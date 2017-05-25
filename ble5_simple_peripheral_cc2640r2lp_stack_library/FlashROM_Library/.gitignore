@@ -1,0 +1,12 @@
+/HAL/
+/Host/
+/ICallBLE/
+/NPI/
+/sources.mk
+/OSAL/
+/PROFILES/
+/ROM/
+/Startup/
+/TOOLS/
+/makefile
+/objects.mk

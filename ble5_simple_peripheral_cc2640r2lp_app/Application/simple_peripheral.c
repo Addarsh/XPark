@@ -416,8 +416,6 @@ static oadTargetCBs_t simpleBLEPeripheral_oadCBs =
 //LED pin states and handles
 static PIN_Handle ledPinHandle;
 static PIN_State ledPinState;
-static uint_t rled_val;
-static uint_t gled_val;
 
 //State machine maintaining state of the GAP
 static gaprole_States_t curr_state = GAPROLE_INIT;
@@ -1421,8 +1419,14 @@ static void SimpleBLEPeripheral_performPeriodicTask(void)
                                &valueToCopy);
   }
 #endif //!FEATURE_OAD_ONCHIP
+  static int local_time = 0;
+  static int on_time = 0;
+
   global_clock++;
-  if(curr_state != GAPROLE_ADVERTISING && global_clock % 4 == 0){
+  local_time++;
+
+  if(local_time % 4 == 0){
+    on_time++;
     //Start advertising
     PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
 
@@ -1430,7 +1434,13 @@ static void SimpleBLEPeripheral_performPeriodicTask(void)
     GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
                              &adv_enable);
   }
-  else if(curr_state == GAPROLE_ADVERTISING && global_clock % 5 == 0){
+  else if(on_time > 0)
+    on_time++;
+
+  if(on_time == 3){
+    on_time = 0;
+    local_time = 0;
+
     //Stop advertising
     PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
 
