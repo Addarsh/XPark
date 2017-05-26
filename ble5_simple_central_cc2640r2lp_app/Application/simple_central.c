@@ -101,12 +101,14 @@
 #define SBC_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
 #define SBC_QUEUE_EVT                         UTIL_QUEUE_EVENT_ID // Event_Id_30
 #define SBC_START_DISCOVERY_EVT               Event_Id_00
-#define SBC_DISCOVERY_TIMEOUT_EVT                 Event_Id_01
+#define SBC_DISCOVERY_TIMEOUT_EVT             Event_Id_01
+#define SBC_DISCOVERED_EVT                    Event_Id_02
 
 #define SBC_ALL_EVENTS                        (SBC_ICALL_EVT           | \
                                                SBC_QUEUE_EVT           | \
                                                SBC_START_DISCOVERY_EVT | \
-                                               SBC_DISCOVERY_TIMEOUT_EVT)
+                                               SBC_DISCOVERY_TIMEOUT_EVT| \
+                                               SBC_DISCOVERED_EVT)
 
 // Default PHY preference
 // Note: BLE_V50_FEATURES is always defined and long range phy (PHY_LR_CFG) is
@@ -178,7 +180,8 @@
 // Default service discovery timer delay in ms
 #define DEFAULT_SVC_DISCOVERY_DELAY           1000
 
-#define PERIODIC_GLOBAL_CLOCK                 1000
+#define PERIODIC_GLOBAL_CLOCK_DELAY                 1000
+#define DISCOVERED_CLOCK_DELAY                      500
 
 // TRUE to filter discovery results on desired service UUID
 #define DEFAULT_DEV_DISC_BY_SVC_UUID          TRUE
@@ -304,6 +307,7 @@ static ICall_SyncHandle syncEvent;
 // Clock object used to signal timeout
 static Clock_Struct startDiscClock;
 static Clock_Struct periodicClock;
+static Clock_Struct disoveredClock;
 
 //static Clock_Struct discovery_clock;
 
@@ -399,6 +403,7 @@ void SimpleBLECentral_startDiscHandler(UArg a0);
 void SimpleBLECentral_keyChangeHandler(uint8 keys);
 void SimpleBLECentral_readRssiHandler(UArg a0);
 void SimpleBLECentral_startPeriodicHandler(UArg a0);
+void SimpleBLECentral_startDiscoveredHandler(UArg a0);
 void SimpleBLECentral_TimeoutHandler(void);
 
 static uint8_t SimpleBLECentral_enqueueMsg(uint8_t event, uint8_t status,
@@ -577,7 +582,11 @@ static void SimpleBLECentral_init(void)
 
   // Sertup the global clock that runs periodically every 1 second
   Util_constructClock(&periodicClock, SimpleBLECentral_startPeriodicHandler,
-                      PERIODIC_GLOBAL_CLOCK, 0, false, 0);
+                      PERIODIC_GLOBAL_CLOCK_DELAY, 0, false, 0);
+
+  // Sertup the discovered clock that runs for a while after a discovery event
+  Util_constructClock(&disoveredClock, SimpleBLECentral_startDiscoveredHandler,
+                      DISCOVERED_CLOCK_DELAY, 0, false, 0);
 
   Board_initKeys(SimpleBLECentral_keyChangeHandler);
 
@@ -758,6 +767,11 @@ static void SimpleBLECentral_taskFxn(UArg a0, UArg a1)
           SimpleBLECentral_TimeoutHandler();
 
           Util_startClock(&periodicClock);
+      }
+
+      if(events & SBC_DISCOVERED_EVT){
+        //Turn off Green LED
+        PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
       }
     }
   }
@@ -972,6 +986,10 @@ static void SimpleBLECentral_processRoleEvent(gapCentralRoleEvent_t *pEvent)
         {
 #ifndef FPGA_AUTO_CONNECT
           Display_print0(dispHandle, 3, 0, "<- To Select");
+          //Turn on Green LED and start clock
+          PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
+          Util_startClock(&disoveredClock);
+
         }
 
         // Initialize scan index.
@@ -1943,6 +1961,12 @@ void SimpleBLECentral_startDiscHandler(UArg a0)
 void SimpleBLECentral_startPeriodicHandler(UArg a0)
 {
   Event_post(syncEvent, SBC_DISCOVERY_TIMEOUT_EVT);
+}
+
+//Handler for the dsicovered event timeout
+void SimpleBLECentral_startDiscoveredHandler(UArg a0)
+{
+  Event_post(syncEvent, SBC_DISCOVERED_EVT);
 }
 
 //Handler for peridic task in the application task

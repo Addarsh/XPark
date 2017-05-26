@@ -1,7 +1,7 @@
 ******************************************************************************
                   TI ARM Linker PC v16.9.1                     
 ******************************************************************************
->> Linked Thu May 25 07:12:59 2017
+>> Linked Fri May 26 06:52:33 2017
 
 OUTPUT FILE NAME:   <ble5_simple_peripheral_cc2640r2lp_app.out>
 ENTRY POINT SYMBOL: "ResetISR"  address: 000113f1
@@ -1835,7 +1835,7 @@ MODULE SUMMARY
        Total:                            724     288       144    
                                                                   
     C:\Users\addar\AppData\Local\Temp\
-       027002                            0       28        450    
+       004682                            0       28        450    
     +--+---------------------------------+-------+---------+---------+
        Total:                            0       28        450    
                                                                   
