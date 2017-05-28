@@ -419,7 +419,7 @@ static PIN_State ledPinState;
 
 //State machine maintaining state of the GAP
 static gaprole_States_t curr_state = GAPROLE_INIT;
-static unsigned int global_clock;
+static uint64_t global_clock;
 
 /*
  * Initial LED pin configuration table
