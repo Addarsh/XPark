@@ -92,6 +92,13 @@
  * CONSTANTS
  */
 
+enum Msg_type_t{
+    TIME_SYNC_START,
+    SYNC_REQUEST,
+    DELAY_REQUEST,
+    DELAY_RESPONSE
+};
+
 #define SBC_STATE_CHANGE_EVT                  0x0001
 #define SBC_KEY_CHANGE_EVT                    0x0002
 #define SBC_RSSI_READ_EVT                     0x0004
@@ -104,14 +111,14 @@
 #define SBC_START_DISCOVERY_EVT               Event_Id_00
 #define SBC_START_SCANNING_EVT                Event_Id_01
 #define SBC_DISCOVERED_EVT                    Event_Id_02
-#define SBC_SCAN_AGAIN_EVT                    Event_Id_03
+#define SBC_START_TIME_SYNC                   Event_Id_03
 
 #define SBC_ALL_EVENTS                        (SBC_ICALL_EVT           | \
                                                SBC_QUEUE_EVT           | \
                                                SBC_START_DISCOVERY_EVT | \
-                                               SBC_START_SCANNING_EVT| \
-                                               SBC_DISCOVERED_EVT    | \
-                                               SBC_SCAN_AGAIN_EVT)
+                                               SBC_START_SCANNING_EVT  | \
+                                               SBC_DISCOVERED_EVT      | \
+                                               SBC_START_TIME_SYNC)
 
 // Default PHY preference
 // Note: BLE_V50_FEATURES is always defined and long range phy (PHY_LR_CFG) is
@@ -126,7 +133,7 @@
 #define DEFAULT_MAX_SCAN_RES                  8
 
 // Scan duration in ms
-#define DEFAULT_SCAN_DURATION                 100
+#define DEFAULT_SCAN_DURATION                 2000
 
 // Discovery mode (limited, general, all)
 #define DEFAULT_DISCOVERY_MODE                DEVDISC_MODE_ALL
@@ -185,8 +192,7 @@
 
 //1 ms timeout for global clock
 #define PERIODIC_GLOBAL_CLOCK_DELAY                 1
-#define SCANNING_CLOCK_DELAY                        2000  //2 seconds
-#define DISCOVERED_CLOCK_DELAY                      50
+#define DISCOVERED_CLOCK_DELAY                      100
 
 // TRUE to filter discovery results on desired service UUID
 #define DEFAULT_DEV_DISC_BY_SVC_UUID          TRUE
@@ -268,6 +274,8 @@ PIN_Config ledPinTable[] = {
   PIN_TERMINATE
 };
 
+static gapDevRec_t *tsync_slave = NULL;
+
 /*********************************************************************
  * TYPEDEFS
  */
@@ -312,10 +320,7 @@ static ICall_SyncHandle syncEvent;
 // Clock object used to signal timeout
 static Clock_Struct startDiscClock;
 static Clock_Struct periodicClock;
-static Clock_Struct scanningClock;
 static Clock_Struct discoveredClock;
-
-//static Clock_Struct discovery_clock;
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
@@ -410,9 +415,9 @@ void SimpleBLECentral_keyChangeHandler(uint8 keys);
 void SimpleBLECentral_readRssiHandler(UArg a0);
 void SimpleBLECentral_startPeriodicHandler(UArg a0);
 void SimpleBLECentral_startDiscoveredHandler(UArg a0);
-void SimpleBLECentral_stopScanningHandler(UArg a0);
 void SimpleBLECentral_startScanning(void);
 void enable_scan(void);
+void SimpleBLECentral_initTimeSync(uint8_t *paddr);
 
 static uint8_t SimpleBLECentral_enqueueMsg(uint8_t event, uint8_t status,
                                            uint8_t *pData);
@@ -584,17 +589,9 @@ static void SimpleBLECentral_init(void)
   // Create an RTOS queue for message from profile to be sent to app.
   appMsgQueue = Util_constructQueue(&appMsg);
 
-  // Setup discovery delay as a one-shot timer
-  //Util_constructClock(&startDiscClock, SimpleBLECentral_startDiscHandler,
-  //                    DEFAULT_SVC_DISCOVERY_DELAY, 0, false, 0);
-
   // Sertup the global clock that runs periodically every 1 millisecond starting now
   Util_constructClock(&periodicClock, SimpleBLECentral_startPeriodicHandler,
                       PERIODIC_GLOBAL_CLOCK_DELAY, PERIODIC_GLOBAL_CLOCK_DELAY, false, 0);
-
-  // Setup a scanning clock that runs every time it is global time to scan
-  Util_constructClock(&scanningClock, SimpleBLECentral_stopScanningHandler,
-                        SCANNING_CLOCK_DELAY, 0, false, 0);
 
   // Sertup the discovered clock that runs for a while after a discovery event
   Util_constructClock(&discoveredClock, SimpleBLECentral_startDiscoveredHandler,
@@ -771,7 +768,7 @@ static void SimpleBLECentral_taskFxn(UArg a0, UArg a1)
       }
 
       if(events &  SBC_START_SCANNING_EVT){
-          Display_print1(dispHandle, 7, 0, "clock: %u", global_clock);
+          //Display_print1(dispHandle, 7, 0, "clock: %u", global_clock);
           //Start scanning now
           SimpleBLECentral_startScanning();
       }
@@ -781,8 +778,10 @@ static void SimpleBLECentral_taskFxn(UArg a0, UArg a1)
         PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
       }
 
-      if(events & SBC_SCAN_AGAIN_EVT){
-        enable_scan();
+      if(events & SBC_START_TIME_SYNC){
+        //Stop scanning
+        if(!GAPCentralRole_CancelDiscovery())
+          Display_print0(dispHandle, 9, 0, "Error! Scanning Cancel failed!");
       }
     }
   }
@@ -972,6 +971,10 @@ static void SimpleBLECentral_processRoleEvent(gapCentralRoleEvent_t *pEvent)
           {
             SimpleBLECentral_addDeviceInfo(pEvent->deviceInfo.addr,
                                            pEvent->deviceInfo.addrType);
+            if(pEvent->deviceInfo.pEvtData[11] == TIME_SYNC_START)
+              SimpleBLECentral_initTimeSync(pEvent->deviceInfo.addr);
+            PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
+            Util_startClock(&discoveredClock);
           }
         }
       }
@@ -979,6 +982,8 @@ static void SimpleBLECentral_processRoleEvent(gapCentralRoleEvent_t *pEvent)
 
     case GAP_DEVICE_DISCOVERY_EVENT:
       {
+        scanningStarted = FALSE;
+        PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
 
         // if not filtering device discovery results based on service UUID
         if (DEFAULT_DEV_DISC_BY_SVC_UUID == FALSE)
@@ -996,8 +1001,6 @@ static void SimpleBLECentral_processRoleEvent(gapCentralRoleEvent_t *pEvent)
 #ifndef FPGA_AUTO_CONNECT
           Display_print0(dispHandle, 3, 0, "<- To Select");
           //Turn on Green LED and start clock
-          PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
-          Util_startClock(&discoveredClock);
         }
 
         // Initialize scan index.
@@ -1006,11 +1009,6 @@ static void SimpleBLECentral_processRoleEvent(gapCentralRoleEvent_t *pEvent)
         // Prompt user that re-performing scanning at this state is possible.
         Display_print0(dispHandle, 5, 0, "Discover ->");
 
-        //If scanningStarted is true, start scanning
-        uint_t key = Swi_disable();
-        if(scanningStarted)
-          Event_post(syncEvent, SBC_SCAN_AGAIN_EVT);
-        Swi_restore(key);
 #else // FPGA_AUTO_CONNECT
           SimpleBLECentral_connectToFirstDevice();
         }
@@ -1978,15 +1976,6 @@ void SimpleBLECentral_startPeriodicHandler(UArg a0)
   global_clock++;
 }
 
-//Timeout at the end of Scan delay period
-void SimpleBLECentral_stopScanningHandler(UArg a0)
-{
-  //Set scanning started to be false
-  Display_print0(dispHandle, 3, 0, "Scaning Compete Bruh! 2 seconds!");
-  scanningStarted = FALSE;
-  PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
-}
-
 //Handler for the dsicovered event timeout
 void SimpleBLECentral_startDiscoveredHandler(UArg a0)
 {
@@ -2004,7 +1993,7 @@ void enable_scan(void){
   Display_print0(dispHandle, 5, 0, "");
   Display_print0(dispHandle, 6, 0, "");
 
-  Display_print1(dispHandle, 7, 0, "clock: %u", global_clock);
+  //Display_print1(dispHandle, 7, 0, "clock: %u", global_clock);
 
   //Start discovery for 2 seconds
   GAPCentralRole_StartDiscovery(DEFAULT_DISCOVERY_MODE,
@@ -2015,14 +2004,30 @@ void enable_scan(void){
 //Handler for peridic task in the application task
 void SimpleBLECentral_startScanning(void)
 {
-  uint_t key = Swi_disable();
-  scanningStarted = TRUE;
-  Swi_restore(key);
-
   enable_scan();
+  scanningStarted = TRUE;
+}
 
-  //Start scanning clock
-  Util_startClock(&scanningClock);
+//Initiate Time sync protocol
+void SimpleBLECentral_initTimeSync(uint8_t *pAddr)
+{
+  //Save this device addr
+  // Check if device is already in scan results
+  if(tsync_slave != NULL)
+    return;
+  for (int i = 0; i < scanRes; i++)
+  {
+    if (memcmp(pAddr, devList[i].addr , B_ADDR_LEN) == 0)
+    {
+      tsync_slave = &devList[i];
+      break;
+    }
+  }
+  if(tsync_slave == NULL)
+    return;
+
+  //Post a start_time_sync message
+  Event_post(syncEvent, SBC_START_TIME_SYNC);
 }
 
 /*********************************************************************

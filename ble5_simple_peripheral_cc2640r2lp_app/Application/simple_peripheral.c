@@ -103,8 +103,17 @@
  * CONSTANTS
  */
 
+enum Msg_type_t{
+    TIME_SYNC_START,
+    SYNC_REQUEST,
+    DELAY_REQUEST,
+    DELAY_RESPONSE
+};
+
 // Advertising interval when device is discoverable (units of 625us, 160=100ms)
 #define DEFAULT_ADVERTISING_INTERVAL          160
+
+#define MY_MANUFACTURER_ID 0x1632
 
 // General discoverable mode: advertise indefinitely
 #define DEFAULT_DISCOVERABLE_MODE             GAP_ADTYPE_FLAGS_GENERAL
@@ -144,8 +153,9 @@
 // Connection Pause Peripheral time value (in seconds)
 #define DEFAULT_CONN_PAUSE_PERIPHERAL         6
 
-// How often to perform periodic event (in msec)
-#define SBP_PERIODIC_EVT_PERIOD               1000
+// Delay period Periodic event that happens every 1 ms
+#define SBP_ADVERTISING_INTERVAL                2000
+#define SBP_GLOBAL_PERIODIC_DELAY               1
 
 // Application specific event ID for HCI Connection Event End Events
 #define SBP_HCI_CONN_EVT_END_EVT              0x0001
@@ -193,7 +203,8 @@
 // Internal Events for RTOS application
 #define SBP_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
 #define SBP_QUEUE_EVT                         UTIL_QUEUE_EVENT_ID // Event_Id_30
-#define SBP_PERIODIC_EVT                      Event_Id_00
+#define SBP_START_ADVERTISING_EVT                      Event_Id_00
+#define SBP_STOP_ADVERTISING_EVT                      Event_Id_01
 
 #ifdef FEATURE_OAD
 // Additional Application Events for OAD
@@ -202,13 +213,15 @@
 // Bitwise OR of all events to pend on with OAD
 #define SBP_ALL_EVENTS                        (SBP_ICALL_EVT        | \
                                                SBP_QUEUE_EVT        | \
-                                               SBP_PERIODIC_EVT     | \
+                                               SBP_START_ADVERTISING_EVT     | \
+                                               SBP_STOP_ADVERTISING_EVT | \
                                                SBP_QUEUE_PING_EVT)
 #else
 // Bitwise OR of all events to pend on
 #define SBP_ALL_EVENTS                        (SBP_ICALL_EVT        | \
                                                SBP_QUEUE_EVT        | \
-                                               SBP_PERIODIC_EVT)
+                                               SBP_START_ADVERTISING_EVT | \
+                                               SBP_STOP_ADVERTISING_EVT)
 #endif /* FEATURE_OAD */
 
 // Row numbers for two-button menu
@@ -248,6 +261,7 @@ static ICall_SyncHandle syncEvent;
 
 // Clock instances for internal periodic events.
 static Clock_Struct periodicClock;
+static Clock_Struct advertisingClock;
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
@@ -303,6 +317,8 @@ static uint8_t scanRspData[] =
   0       // 0dBm
 };
 
+
+
 // Advertisement data (max size = 31 bytes, though this is
 // best kept short to conserve power while advertising)
 static uint8_t advertData[] =
@@ -328,8 +344,13 @@ static uint8_t advertData[] =
 #endif //FEATURE_OAD
 #ifndef FEATURE_OAD_ONCHIP
   LO_UINT16(SIMPLEPROFILE_SERV_UUID),
-  HI_UINT16(SIMPLEPROFILE_SERV_UUID)
+  HI_UINT16(SIMPLEPROFILE_SERV_UUID),
 #endif //FEATURE_OAD_ONCHIP
+  0x04,
+  GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+  LO_UINT16(MY_MANUFACTURER_ID),
+  HI_UINT16(MY_MANUFACTURER_ID),
+  TIME_SYNC_START
 };
 
 // GAP GATT Attributes
@@ -351,8 +372,10 @@ static uint8_t SimpleBLEPeripheral_processGATTMsg(gattMsgEvent_t *pMsg);
 static void SimpleBLEPeripheral_processAppMsg(sbpEvt_t *pMsg);
 static void SimpleBLEPeripheral_processStateChangeEvt(gaprole_States_t newState);
 static void SimpleBLEPeripheral_processCharValueChangeEvt(uint8_t paramID);
-static void SimpleBLEPeripheral_performPeriodicTask(void);
-static void SimpleBLEPeripheral_clockHandler(UArg arg);
+static void SimpleBLEPeripheral_PeriodicHandler(UArg arg);
+static void SimpleBLEPeripheral_stopAdvertisingHandler(UArg arg);
+static void SimpleBLEPeripheral_startAdvertising(void);
+static void SimpleBLEPeripheral_stopAdvertising(void);
 
 static void SimpleBLEPeripheral_sendAttRsp(void);
 static void SimpleBLEPeripheral_freeAttRsp(uint8_t status);
@@ -511,9 +534,13 @@ static void SimpleBLEPeripheral_init(void)
   // Create an RTOS queue for message from profile to be sent to app.
   appMsgQueue = Util_constructQueue(&appMsg);
 
-  // Create one-shot clocks for internal periodic events.
-  Util_constructClock(&periodicClock, SimpleBLEPeripheral_clockHandler,
-                      SBP_PERIODIC_EVT_PERIOD, 0, false, SBP_PERIODIC_EVT);
+  //Create periodic clock for global timer
+  Util_constructClock(&periodicClock, SimpleBLEPeripheral_PeriodicHandler,
+                      SBP_GLOBAL_PERIODIC_DELAY, SBP_GLOBAL_PERIODIC_DELAY, false, 0);
+
+  //Start one-shot clock for advertising interval
+  Util_constructClock(&advertisingClock, SimpleBLEPeripheral_stopAdvertisingHandler,
+                        SBP_ADVERTISING_INTERVAL, 0, false, 0);
 
   dispHandle = Display_open(SBP_DISPLAY_TYPE, NULL);
 
@@ -817,12 +844,15 @@ static void SimpleBLEPeripheral_taskFxn(UArg a0, UArg a1)
         }
       }
 
-      if (events & SBP_PERIODIC_EVT)
+      if (events & SBP_START_ADVERTISING_EVT)
       {
-        Util_startClock(&periodicClock);
+        //Start Advertising now
+        SimpleBLEPeripheral_startAdvertising();
+      }
 
-        // Perform periodic application task
-        SimpleBLEPeripheral_performPeriodicTask();
+      if(events & SBP_STOP_ADVERTISING_EVT)
+      {
+        SimpleBLEPeripheral_stopAdvertising();
       }
 
 #ifdef FEATURE_OAD
@@ -1200,6 +1230,7 @@ static void SimpleBLEPeripheral_processStateChangeEvt(gaprole_States_t newState)
         Display_print0(dispHandle, SBP_ROW_BDADDR, 0, Util_convertBdAddr2Str(ownAddress));
         Display_print0(dispHandle, SBP_ROW_ROLESTATE, 0, "Initialized");
 
+        //Start periodic clock
         Util_startClock(&periodicClock);
       }
       break;
@@ -1239,8 +1270,6 @@ static void SimpleBLEPeripheral_processStateChangeEvt(gaprole_States_t newState)
       {
         linkDBInfo_t linkInfo;
         uint8_t numActive = 0;
-
-       // Util_startClock(&periodicClock);
 
         numActive = linkDB_NumActive();
 
@@ -1391,7 +1420,7 @@ static void SimpleBLEPeripheral_processCharValueChangeEvt(uint8_t paramID)
 }
 
 /*********************************************************************
- * @fn      SimpleBLEPeripheral_performPeriodicTask
+ * @fn      SimpleBLEPeripheral_startAdvertising
  *
  * @brief   Perform a periodic application task. This function gets called
  *          every five seconds (SBP_PERIODIC_EVT_PERIOD). In this example,
@@ -1403,8 +1432,9 @@ static void SimpleBLEPeripheral_processCharValueChangeEvt(uint8_t paramID)
  *
  * @return  None.
  */
-static void SimpleBLEPeripheral_performPeriodicTask(void)
+static void SimpleBLEPeripheral_startAdvertising(void)
 {
+/*
 #ifndef FEATURE_OAD_ONCHIP
   uint8_t valueToCopy;
 
@@ -1419,35 +1449,26 @@ static void SimpleBLEPeripheral_performPeriodicTask(void)
                                &valueToCopy);
   }
 #endif //!FEATURE_OAD_ONCHIP
-  static int local_time = 0;
-  static int on_time = 0;
+*/
+  //Start advertising
+  PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
 
-  global_clock++;
-  local_time++;
-
-  if(local_time % 4 == 0){
-    on_time++;
-    //Start advertising
-    PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
-
-    uint8_t adv_enable = TRUE;
-    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
+  uint8_t adv_enable = TRUE;
+  GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
                              &adv_enable);
-  }
-  else if(on_time > 0)
-    on_time++;
 
-  if(on_time == 3){
-    on_time = 0;
-    local_time = 0;
+  Util_startClock(&advertisingClock);
+}
 
-    //Stop advertising
-    PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
+//Stop advertising here
+static void SimpleBLEPeripheral_stopAdvertising(void)
+{
+  //Stop advertising
+  PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
 
-    uint8_t adv_enable = FALSE;
-    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
-                                       &adv_enable);
-  }
+  uint8_t adv_enable = FALSE;
+  GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
+                                           &adv_enable);
 }
 
 
@@ -1492,7 +1513,7 @@ void SimpleBLEPeripheral_processOadWriteCB(uint8_t event, uint16_t connHandle,
 #endif //FEATURE_OAD
 
 /*********************************************************************
- * @fn      SimpleBLEPeripheral_clockHandler
+ * @fn      SimpleBLEPeripheral_PeriodicHandler
  *
  * @brief   Handler function for clock timeouts.
  *
@@ -1500,10 +1521,18 @@ void SimpleBLEPeripheral_processOadWriteCB(uint8_t event, uint16_t connHandle,
  *
  * @return  None.
  */
-static void SimpleBLEPeripheral_clockHandler(UArg arg)
+static void SimpleBLEPeripheral_PeriodicHandler(UArg arg)
 {
-  // Wake up the application.
-  Event_post(syncEvent, arg);
+   if(global_clock % 5000 == 0) //if it's 5 sec
+     Event_post(syncEvent, SBP_START_ADVERTISING_EVT);
+
+   global_clock++;
+}
+
+
+static void SimpleBLEPeripheral_stopAdvertisingHandler(UArg arg)
+{
+  Event_post(syncEvent, SBP_STOP_ADVERTISING_EVT);
 }
 
 #if !defined(Display_DISABLE_ALL)
