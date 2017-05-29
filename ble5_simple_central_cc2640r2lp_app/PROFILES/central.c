@@ -129,7 +129,7 @@ static gapCentralRoleCB_t *pGapCentralRoleCB;
  * Profile Parameters - reference GAPCENTRALROLE_PROFILE_PARAMETERS for
  * descriptions
  */
-
+static uint8_t  gapRole_profileRole;
 static uint8_t  gapCentralRoleIRK[KEYLEN];
 static uint8_t  gapCentralRoleSRK[KEYLEN];
 static uint32_t gapCentralRoleSignCounter;

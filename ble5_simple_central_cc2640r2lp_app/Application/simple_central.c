@@ -84,6 +84,8 @@
 
 #include "ble_user_config.h"
 
+#include "peripheral.h"
+
 /*********************************************************************
  * MACROS
  */
@@ -91,13 +93,6 @@
 /*********************************************************************
  * CONSTANTS
  */
-
-enum Msg_type_t{
-    TIME_SYNC_START,
-    SYNC_REQUEST,
-    DELAY_REQUEST,
-    DELAY_RESPONSE
-};
 
 #define SBC_STATE_CHANGE_EVT                  0x0001
 #define SBC_KEY_CHANGE_EVT                    0x0002
@@ -111,14 +106,16 @@ enum Msg_type_t{
 #define SBC_START_DISCOVERY_EVT               Event_Id_00
 #define SBC_START_SCANNING_EVT                Event_Id_01
 #define SBC_DISCOVERED_EVT                    Event_Id_02
-#define SBC_START_TIME_SYNC                   Event_Id_03
+#define SBC_START_TIME_SYNC_EVT               Event_Id_03
+#define SBC_TIMEOUT_EVT                       Event_Id_04
 
 #define SBC_ALL_EVENTS                        (SBC_ICALL_EVT           | \
                                                SBC_QUEUE_EVT           | \
                                                SBC_START_DISCOVERY_EVT | \
                                                SBC_START_SCANNING_EVT  | \
                                                SBC_DISCOVERED_EVT      | \
-                                               SBC_START_TIME_SYNC)
+                                               SBC_START_TIME_SYNC_EVT | \
+                                               SBC_TIMEOUT_EVT)
 
 // Default PHY preference
 // Note: BLE_V50_FEATURES is always defined and long range phy (PHY_LR_CFG) is
@@ -129,8 +126,14 @@ enum Msg_type_t{
   #define NUM_PHY                           3
 #endif // PHY_LR_CFG
 
+//Manufactuer ID for advertising data
+#define MY_MANUFACTURER_ID                  0x1633
+
 // Maximum number of scan responses
 #define DEFAULT_MAX_SCAN_RES                  8
+
+//Default  advertising interval
+#define DEFAULT_ADVERTISING_INTERVAL          160
 
 // Scan duration in ms
 #define DEFAULT_SCAN_DURATION                 2000
@@ -193,6 +196,7 @@ enum Msg_type_t{
 //1 ms timeout for global clock
 #define PERIODIC_GLOBAL_CLOCK_DELAY                 1
 #define DISCOVERED_CLOCK_DELAY                      100
+#define TIMEOUT_CLOCK_DELAY                        1000
 
 // TRUE to filter discovery results on desired service UUID
 #define DEFAULT_DEV_DISC_BY_SVC_UUID          TRUE
@@ -257,8 +261,45 @@ typedef enum {
   DISCONNECT               // Disconnect
 } keyPressConnOpt_t;
 
+//Message types
+enum Msg_type{
+  TIME_SYNC_START,
+  SYNC_REQ,
+  SYNC_RESP,
+  DELAY_REQ,
+  DELAY_RSP
+};
+
+//States during time sync
+enum tsync_state_t{
+  TSYNC_STATE_NONE,
+  SYNC_REQ_SENT,
+  WAIT_FOR_SYNC_REQ,
+  SYNC_RESP_SENT,
+  WAIT_FOR_SYNC_RESP,
+  DELAY_REQ_SENT,
+  WAIT_FOR_DELAY_REQ,
+  TSYNC_STATE_ERROR
+};
+
+enum tsync_role_t{
+  TSYNC_ROLE_NONE,
+  MASTER,
+  SLAVE,
+  TSYNC_ROLE_ERROR
+};
+
 //Global clock for synchroniation
 static uint64_t global_clock;
+
+//Static time variables associated with Time sync
+static uint64_t Tsync_T1 = 0;
+static uint64_t Tsync_T1_recv = 0;
+static uint64_t Tsync_T2 = 0;
+static uint64_t Tsync_T2_recv = 0;
+
+static enum tsync_state_t tsync_state = TSYNC_STATE_NONE;
+static enum tsync_role_t tsync_role = TSYNC_ROLE_NONE;
 
 //LED pin states and handles
 static PIN_Handle ledPinHandle;
@@ -274,7 +315,82 @@ PIN_Config ledPinTable[] = {
   PIN_TERMINATE
 };
 
+//Information about slave trying to sync with host
 static gapDevRec_t *tsync_slave = NULL;
+
+// Scan response data (max size = 31 bytes)
+static uint8_t scanRspData[] =
+{
+  // complete name
+  0x14,   // length of this data
+  GAP_ADTYPE_LOCAL_NAME_COMPLETE,
+  'S',
+  'i',
+  'm',
+  'p',
+  'l',
+  'e',
+  'B',
+  'L',
+  'E',
+  'P',
+  'e',
+  'r',
+  'i',
+  'p',
+  'h',
+  'e',
+  'r',
+  'a',
+  'l',
+  // Tx power level
+  0x02,   // length of this data
+  GAP_ADTYPE_POWER_LEVEL,
+  0,       // 0dBm
+};
+
+
+
+// Advertisement data (max size = 31 bytes, though this is
+// best kept short to conserve power while advertising)
+static uint8_t advertData[] =
+{
+  // Flags: this field sets the device to use general discoverable
+  // mode (advertises indefinitely) instead of general
+  // discoverable mode (advertise for 30 seconds at a time)
+  0x02,   // length of this data
+  GAP_ADTYPE_FLAGS,
+  GAP_ADTYPE_FLAGS_GENERAL | GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED,
+
+  // service UUID, to notify central devices what services are included
+  // in this peripheral
+#if !defined(FEATURE_OAD) || defined(FEATURE_OAD_ONCHIP)
+  0x03,   // length of this data
+#else //OAD for external flash
+  0x05,  // length of this data
+#endif //FEATURE_OAD
+  GAP_ADTYPE_16BIT_MORE,      // some of the UUID's, but not all
+#ifdef FEATURE_OAD
+  LO_UINT16(OAD_SERVICE_UUID),
+  HI_UINT16(OAD_SERVICE_UUID),
+#endif //FEATURE_OAD
+#ifndef FEATURE_OAD_ONCHIP
+  LO_UINT16(SIMPLEPROFILE_SERV_UUID),
+  HI_UINT16(SIMPLEPROFILE_SERV_UUID),
+#endif //FEATURE_OAD_ONCHIP
+  //0x04,
+  //GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+  //LO_UINT16(MY_MANUFACTURER_ID),
+  //HI_UINT16(MY_MANUFACTURER_ID),
+  //TIME_SYNC_START
+
+  0x0b,
+  GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+  LO_UINT16(MY_MANUFACTURER_ID),
+  HI_UINT16(MY_MANUFACTURER_ID),
+  0,0,0,0,0,0,0,0
+};
+
 
 /*********************************************************************
  * TYPEDEFS
@@ -321,6 +437,7 @@ static ICall_SyncHandle syncEvent;
 static Clock_Struct startDiscClock;
 static Clock_Struct periodicClock;
 static Clock_Struct discoveredClock;
+static Clock_Struct timeoutClock;
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
@@ -415,9 +532,12 @@ void SimpleBLECentral_keyChangeHandler(uint8 keys);
 void SimpleBLECentral_readRssiHandler(UArg a0);
 void SimpleBLECentral_startPeriodicHandler(UArg a0);
 void SimpleBLECentral_startDiscoveredHandler(UArg a0);
+void SimpleBLECentral_startTimeoutHandler(UArg a0);
 void SimpleBLECentral_startScanning(void);
 void enable_scan(void);
 void SimpleBLECentral_initTimeSync(uint8_t *paddr);
+void SimpleBLECentral_initAdvertising(void);
+void SimpleBLECentral_update_adv(uint64_t *time_ptr);
 
 static uint8_t SimpleBLECentral_enqueueMsg(uint8_t event, uint8_t status,
                                            uint8_t *pData);
@@ -537,6 +657,36 @@ void SimpleBLECentral_createTask(void)
   Task_construct(&sbcTask, SimpleBLECentral_taskFxn, &taskParams, NULL);
 }
 
+//Initialize advertising parameters for the device
+void SimpleBLECentral_initAdvertising(void)
+{
+  // Set the Peripheral GAPRole Parameters
+  uint8_t initialAdvertEnable = FALSE;
+  uint16_t advertOffTime = 0;
+
+  // device starts advertising upon initialization
+  GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
+                             &initialAdvertEnable);
+
+  // By setting this to zero, the device will go into the waiting state after
+  // being discoverable for 30.72 second, and will not being advertising again
+  // until the enabler is set back to TRUE
+  GAPRole_SetParameter(GAPROLE_ADVERT_OFF_TIME, sizeof(uint16_t),
+                             &advertOffTime);
+
+  GAPRole_SetParameter(GAPROLE_SCAN_RSP_DATA, sizeof(scanRspData),
+                         scanRspData);
+  GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData);
+
+  uint16_t advInt = DEFAULT_ADVERTISING_INTERVAL;
+
+  GAP_SetParamValue(TGAP_LIM_DISC_ADV_INT_MIN, advInt);
+  GAP_SetParamValue(TGAP_LIM_DISC_ADV_INT_MAX, advInt);
+  GAP_SetParamValue(TGAP_GEN_DISC_ADV_INT_MIN, advInt);
+  GAP_SetParamValue(TGAP_GEN_DISC_ADV_INT_MAX, advInt);
+}
+
+
 /*********************************************************************
  * @fn      SimpleBLECentral_Init
  *
@@ -596,6 +746,10 @@ static void SimpleBLECentral_init(void)
   // Sertup the discovered clock that runs for a while after a discovery event
   Util_constructClock(&discoveredClock, SimpleBLECentral_startDiscoveredHandler,
                       DISCOVERED_CLOCK_DELAY, 0, false, 0);
+
+  // Sertup a timeout clock to enable timing out within a tsync state
+  Util_constructClock(&timeoutClock, SimpleBLECentral_startTimeoutHandler,
+                        TIMEOUT_CLOCK_DELAY, 0, false, 0);
 
   Board_initKeys(SimpleBLECentral_keyChangeHandler);
 
@@ -679,7 +833,9 @@ static void SimpleBLECentral_init(void)
 #endif // BLE_V42_FEATURES & PRIVACY_1_2_CFG
 
   // Start the Device
+  Display_print0(dispHandle, 9, 0, "Before start device...!");
   VOID GAPCentralRole_StartDevice(&SimpleBLECentral_roleCB);
+  Display_print0(dispHandle, 10, 0, "Start device complete!");
 
   // Register with bond manager after starting device
   GAPBondMgr_Register(&SimpleBLECentral_bondCB);
@@ -767,24 +923,50 @@ static void SimpleBLECentral_taskFxn(UArg a0, UArg a1)
         }
       }
 
-      if(events &  SBC_START_SCANNING_EVT){
-          //Display_print1(dispHandle, 7, 0, "clock: %u", global_clock);
-          //Start scanning now
-          SimpleBLECentral_startScanning();
-      }
+      switch(tsync_state){
+        case TSYNC_STATE_NONE:
+          if(events &  SBC_START_SCANNING_EVT){
+            //Display_print1(dispHandle, 7, 0, "clock: %u", global_clock);
+            //Start scanning now
+            SimpleBLECentral_startScanning();
+          }
 
-      if(events & SBC_DISCOVERED_EVT){
-        //Turn off Green LED
-        PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
-      }
+          if(events & SBC_DISCOVERED_EVT){
+            //Turn off Green LED
+            PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
+          }
 
-      if(events & SBC_START_TIME_SYNC){
-        //Stop scanning
-        if(!GAPCentralRole_CancelDiscovery())
-          Display_print0(dispHandle, 9, 0, "Error! Scanning Cancel failed!");
+          if(events & SBC_START_TIME_SYNC_EVT){
+            tsync_role = MASTER;
+            //Stop scanning
+            if(!GAPCentralRole_CancelDiscovery())
+              Display_print0(dispHandle, 9, 0, "Error! Scanning Cancel failed!");
+
+            //Update advertising parameters, get global clock
+            SimpleBLECentral_update_adv(&Tsync_T1);
+
+            //Start Advertising now
+            uint8_t adv_enable = TRUE;
+            GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t),
+                                   &adv_enable);
+            tsync_state = SYNC_REQ_SENT;
+
+            //Start max timeout clock
+            Util_startClock(&timeoutClock);
+          }
+        break;
+
+        case SYNC_REQ_SENT:
+          if(events & SBC_TIMEOUT_EVT){
+            tsync_state = TSYNC_STATE_NONE;
+            tsync_role = TSYNC_ROLE_NONE;
+            break;
+          }
+        break;
       }
     }
   }
+
 }
 
 /*********************************************************************
@@ -1982,6 +2164,10 @@ void SimpleBLECentral_startDiscoveredHandler(UArg a0)
   Event_post(syncEvent, SBC_DISCOVERED_EVT);
 }
 
+void SimpleBLECentral_startTimeoutHandler(UArg a0)
+{
+  Event_post(syncEvent, SBC_TIMEOUT_EVT);
+}
 
 void enable_scan(void){
   //Turn on LED
@@ -2027,7 +2213,21 @@ void SimpleBLECentral_initTimeSync(uint8_t *pAddr)
     return;
 
   //Post a start_time_sync message
-  Event_post(syncEvent, SBC_START_TIME_SYNC);
+  Event_post(syncEvent, SBC_START_TIME_SYNC_EVT);
+}
+
+void SimpleBLECentral_update_adv(uint64_t *time_ptr)
+{
+  //Get clock value
+  uint_t key = Swi_disable();
+  *time_ptr = global_clock;
+  Swi_restore(key);
+
+  //Memset the time
+  memcpy(&advertData[11],time_ptr,8);
+
+  //Update advertising parameters
+  GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData);
 }
 
 /*********************************************************************
