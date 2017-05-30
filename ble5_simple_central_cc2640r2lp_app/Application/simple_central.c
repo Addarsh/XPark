@@ -539,6 +539,7 @@ void SimpleBLECentral_initTimeSync(uint8_t *paddr);
 void SimpleBLECentral_initAdvertising(void);
 void SimpleBLECentral_update_adv(uint64_t *time_ptr);
 
+
 static uint8_t SimpleBLECentral_enqueueMsg(uint8_t event, uint8_t status,
                                            uint8_t *pData);
 
