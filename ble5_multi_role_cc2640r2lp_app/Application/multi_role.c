@@ -115,7 +115,8 @@ Release Date: 2017-05-02 17:08:44
 //Clock delays
 #define PERIODIC_GLOBAL_CLOCK_DELAY                 1
 #define DISCOVERED_CLOCK_DELAY                      100
-#define TIMEOUT_CLOCK_DELAY                        1000
+#define TIMEOUT_CLOCK_DELAY                        3000
+#define SBP_ADVERTISING_INTERVAL                   2000
 
 // Discovey mode (limited, general, all)
 #define DEFAULT_DISCOVERY_MODE                DEVDISC_MODE_ALL
@@ -133,7 +134,8 @@ Release Date: 2017-05-02 17:08:44
 #define DEFAULT_LINK_WHITE_LIST               FALSE
 
 //Manufactuer ID for advertising data
-#define MY_MANUFACTURER_ID                  0x1633
+#define MY_MANUFACTURER_ID_0                  0x1633
+#define MY_MANUFACTURER_ID_1                  0x1632
 
 // Type of Display to open
 #if !defined(Display_DISABLE_ALL)
@@ -174,10 +176,11 @@ Release Date: 2017-05-02 17:08:44
 #define MR_PAIRING_STATE_EVT                 Event_Id_04
 #define MR_PASSCODE_NEEDED_EVT               Event_Id_05
 #define MR_PERIODIC_EVT                      Event_Id_06
-#define SBC_START_SCANNING_EVT               Event_Id_07
+#define MR_START_EVT               Event_Id_07
 #define SBC_DISCOVERED_EVT                   Event_Id_08
 #define SBC_START_TIME_SYNC_EVT              Event_Id_09
 #define SBC_TIMEOUT_EVT                      Event_Id_10
+#define MR_STOP_ADVERTISING_EVT              Event_Id_11
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -188,10 +191,11 @@ Release Date: 2017-05-02 17:08:44
                                              MR_PAIRING_STATE_EVT    | \
                                              MR_PERIODIC_EVT         | \
                                              MR_PASSCODE_NEEDED_EVT  | \
-                                             SBC_START_SCANNING_EVT  | \
+                                             MR_START_EVT  | \
                                              SBC_DISCOVERED_EVT      | \
                                              SBC_START_TIME_SYNC_EVT | \
-                                             SBC_TIMEOUT_EVT)
+                                             SBC_TIMEOUT_EVT         | \
+                                             MR_STOP_ADVERTISING_EVT)
 
 // Discovery states
 typedef enum {
@@ -304,6 +308,13 @@ enum tsync_role_t{
   TSYNC_ROLE_ERROR
 };
 
+enum dev_state_t{
+  UNSYNCED,
+  SYNCING,
+  SYNCED_SCANNING,
+  SYNCED_ADV
+};
+
 // Number of scan results and scan result index
 static uint8_t scanRes = 0;
 static int8_t scanIdx = -1;
@@ -319,6 +330,8 @@ static uint64_t Tsync_T2_recv = 0;
 
 static enum tsync_state_t tsync_state = TSYNC_STATE_NONE;
 static enum tsync_role_t tsync_role = TSYNC_ROLE_NONE;
+//static enum dev_state_t dev_state = SYNCED_SCANNING;
+static enum dev_state_t dev_state = UNSYNCED;
 //Information about slave trying to sync with host
 static mrDevRec_t *tsync_slave = NULL;
 
@@ -330,6 +343,7 @@ static PIN_State ledPinState;
 static Clock_Struct periodicClock;
 static Clock_Struct discoveredClock;
 static Clock_Struct timeoutClock;
+static Clock_Struct advertisingClock;
 
 /*
  * Initial LED pin configuration table
@@ -367,7 +381,15 @@ static uint8_t scanRspData[] =
   // Tx power level
   0x02,   // length of this data
   GAP_ADTYPE_POWER_LEVEL,
-  0       // 0dBm
+  0,       // 0dBm
+
+  //Custom data, timestamp in this case
+  11,
+  GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+  LO_UINT16(MY_MANUFACTURER_ID_0),
+  HI_UINT16(MY_MANUFACTURER_ID_0),
+  0,0,0,0,0,0,0,0,
+
 };
 
 // GAP - Advertisement data (max size = 31 bytes, though this is
@@ -388,12 +410,11 @@ static uint8_t advertData[] =
   LO_UINT16(SIMPLEPROFILE_SERV_UUID),
   HI_UINT16(SIMPLEPROFILE_SERV_UUID),
 
-  //Custom data, timestamp in this case
-  11,
+  0x04,
   GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-  LO_UINT16(MY_MANUFACTURER_ID),
-  HI_UINT16(MY_MANUFACTURER_ID),
-  0,0,0,0,0,0,0,0
+  LO_UINT16(MY_MANUFACTURER_ID_1),
+  HI_UINT16(MY_MANUFACTURER_ID_1),
+  TIME_SYNC_START
 };
 
 // pointer to allocate the connection handle map
@@ -478,13 +499,14 @@ static void multi_role_performPeriodicTask(void);
 static void multi_role_clockHandler(UArg arg);
 
 /*Functions ported from simple_central.c */
-static void SimpleBLECentral_startScanning(void);
 static void SimpleBLECentral_startPeriodicHandler(UArg a0);
 static void SimpleBLECentral_startDiscoveredHandler(UArg a0);
 static void SimpleBLECentral_startTimeoutHandler(UArg a0);
+static void SimpleBLEPeripheral_stopAdvertisingHandler(UArg arg);
 static void SimpleBLECentral_initTimeSync(uint8_t *pAddr);
 static void SimpleBLECentral_update_adv(uint64_t *time_ptr);
 static void SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType);
+static uint64_t get_curr_time(void);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -606,6 +628,10 @@ static void multi_role_init(void)
    // Sertup a timeout clock to enable timing out within a tsync state
    Util_constructClock(&timeoutClock, SimpleBLECentral_startTimeoutHandler,
                          TIMEOUT_CLOCK_DELAY, 0, false, 0);
+
+   //Start one-shot clock for advertising interval
+   Util_constructClock(&advertisingClock, SimpleBLEPeripheral_stopAdvertisingHandler,
+                           SBP_ADVERTISING_INTERVAL, 0, false, 0);
 
   // Setup the GAP
   {
@@ -869,45 +895,80 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
           }
         }
       }
-
-      switch(tsync_state){
-        case TSYNC_STATE_NONE:
-          if(events &  SBC_START_SCANNING_EVT){
-            //Display_print1(dispHandle, 17, 0, "clock: %u", global_clock);
-            //Start scanning now
-            SimpleBLECentral_startScanning();
-          }
-
-          if(events & SBC_DISCOVERED_EVT){
-            //Turn off Green LED
-            PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
-          }
-
-          if(events & SBC_START_TIME_SYNC_EVT){
-            tsync_role = MASTER;
-            //Stop scanning
-            mr_doScan(0);
-
-            //Update advertising parameters, get global clock
-            SimpleBLECentral_update_adv(&Tsync_T1);
-
+      switch(dev_state){
+        case UNSYNCED:
+          if (events & MR_START_EVT)
+          {
             //Start Advertising now
+            PIN_setOutputValue(ledPinHandle, Board_RLED, 1); //Turn on advertising
             mr_doAdvertise(0);
-            tsync_state = SYNC_REQ_SENT;
 
-            //Start max timeout clock
-            Util_startClock(&timeoutClock);
+            Util_startClock(&advertisingClock);
+          }
+          if(events & MR_STOP_ADVERTISING_EVT)
+          {
+            PIN_setOutputValue(ledPinHandle, Board_RLED, 0); //Turn off advertising
+            mr_doAdvertise(0);
           }
         break;
 
-        case SYNC_REQ_SENT:
-          if(events & SBC_TIMEOUT_EVT){
-            tsync_state = TSYNC_STATE_NONE;
-            tsync_role = TSYNC_ROLE_NONE;
+        case SYNCED_SCANNING:
+          switch(tsync_state){
+            case TSYNC_STATE_NONE:
+              if(events &  MR_START_EVT){
+                //Display_print1(dispHandle, 17, 0, "clock: %u", global_clock);
+                Display_print0(dispHandle, 16, 0, "Started scanning!");
+                Display_print0(dispHandle, 17, 0, "");
+                Display_print0(dispHandle, 18, 0, "");
+                //Start scanning now
+                PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
+                mr_doScan(0);
+              }
+
+              if(events & SBC_DISCOVERED_EVT){
+                //Turn off Green LED
+                PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
+              }
+
+              if(events & SBC_START_TIME_SYNC_EVT){
+                Display_print0(dispHandle, 17, 0, "Time sync has started!");
+                PIN_setOutputValue(ledPinHandle, Board_RLED, 0); //Turn off scanning
+
+                //Stop scanning
+                mr_doScan(0);
+                Display_print0(dispHandle, 16, 0, "");
+                tsync_role = MASTER;
+
+
+                Tsync_T1 = get_curr_time();
+                //Update advertising parameters, get global clock
+                SimpleBLECentral_update_adv(&Tsync_T1);
+
+                //Start Advertising now
+                mr_doAdvertise(0);
+                tsync_state = SYNC_REQ_SENT;
+
+                //Start max timeout clock
+                Util_startClock(&timeoutClock);
+              }
             break;
-          }
+
+            case SYNC_REQ_SENT:
+              if(events & SBC_TIMEOUT_EVT){
+                tsync_state = TSYNC_STATE_NONE;
+                tsync_role = TSYNC_ROLE_NONE;
+                tsync_slave = NULL;
+
+                //Stop advertising
+                mr_doAdvertise(0);
+                Display_print0(dispHandle, 18, 0, "Timed out time syncing!");
+                break;
+              }
+            break;
+        }
         break;
       }
+
 
       /*if (events & MR_PERIODIC_EVT)
       {
@@ -991,7 +1052,16 @@ static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg)
 
             }
             break;
-
+          case HCI_LE_EVENT_CODE:
+            {
+              hciEvt_BLEScanReqReport_t* scanRequestReport = (hciEvt_BLEScanReqReport_t*)pMsg;
+              if (scanRequestReport->BLEEventCode == HCI_BLE_SCAN_REQ_REPORT_EVENT)
+              {
+                // process ScanRequestReport here
+                  Display_print0(dispHandle, 20, 0, "Found a scan request!");
+              }
+            }
+            break;
           case HCI_BLE_HARDWARE_ERROR_EVENT_CODE:
             AssertHandler(HAL_ASSERT_CAUSE_HARDWARE_ERROR,0);
             break;
@@ -1310,6 +1380,9 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       // Set device info characteristic
       DevInfo_SetParameter(DEVINFO_SYSTEM_ID, DEVINFO_SYSTEM_ID_LEN, pEvent->initDone.devAddr);
 
+      //Configure the Scan Reuest report HCI command
+      HCI_EXT_ScanReqRptCmd(HCI_EXT_ENABLE_SCAN_REQUEST_REPORT);
+
       //Start periodic clock here
       Util_startClock(&periodicClock);
 
@@ -1343,8 +1416,8 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
     {
       SimpleBLECentral_addDeviceInfo(pEvent->deviceInfo.addr,
                                        pEvent->deviceInfo.addrType);
-     // if(pEvent->deviceInfo.pEvtData[11] == TIME_SYNC_START)
-     //   SimpleBLECentral_initTimeSync(pEvent->deviceInfo.addr);
+     if(pEvent->deviceInfo.pEvtData[11] == TIME_SYNC_START)
+        SimpleBLECentral_initTimeSync(pEvent->deviceInfo.addr);
       PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
       Util_startClock(&discoveredClock);
     }
@@ -2256,7 +2329,7 @@ bool mr_doAdvertise(uint8_t index)
 static void SimpleBLECentral_startPeriodicHandler(UArg a0)
 {
   if(global_clock % 5000 == 0) //if it's 5 sec
-    Event_post(syncEvent, SBC_START_SCANNING_EVT);
+    Event_post(syncEvent, MR_START_EVT);
   global_clock++;
 }
 
@@ -2271,11 +2344,9 @@ static void SimpleBLECentral_startTimeoutHandler(UArg a0)
   Event_post(syncEvent, SBC_TIMEOUT_EVT);
 }
 
-//Handler for peridic task in the application task
-static void SimpleBLECentral_startScanning(void)
+static void SimpleBLEPeripheral_stopAdvertisingHandler(UArg arg)
 {
-  PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
-  mr_doScan(0);
+  Event_post(syncEvent, MR_STOP_ADVERTISING_EVT);
 }
 
 //Initiate Time sync protocol
@@ -2308,7 +2379,7 @@ static void SimpleBLECentral_update_adv(uint64_t *time_ptr)
   Swi_restore(key);
 
   //Memset the time
-  memcpy(&advertData[19],time_ptr,8);
+  memcpy(&advertData[19],(void *)time_ptr,8);
 
   //Update advertising parameters
   GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
@@ -2337,5 +2408,14 @@ static void SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType)
     // Increment scan result count
     scanRes++;
   }
+}
+
+static uint64_t get_curr_time(void)
+{
+  uint64_t curr_time;
+  uint_t key = Swi_disable();
+  curr_time = global_clock;
+  Swi_restore(key);
+  return curr_time;
 }
 /**********************************************************************/
