@@ -92,6 +92,11 @@ Release Date: 2017-05-02 17:08:44
 // amount of item actions the menu module supports
 #define DEFAULT_MAX_SCAN_RES                  15
 
+// Maximum number of scan requests
+// The number will eventually decide how much time we need to advertise
+// before we move to connectable advertising.
+#define DEFAULT_MAX_SCAN_REQ                  10
+
 // Advertising interval when device is discoverable (units of 625us, 160=100ms)
 #define DEFAULT_ADVERTISING_INTERVAL          160
 
@@ -115,14 +120,15 @@ Release Date: 2017-05-02 17:08:44
 //Clock delays
 #define PERIODIC_GLOBAL_CLOCK_DELAY                 1
 #define DISCOVERED_CLOCK_DELAY                      100
-#define TIMEOUT_CLOCK_DELAY                        3000
-#define SBP_ADVERTISING_INTERVAL                   2000
+#define TIMEOUT_CLOCK_DELAY                        1000 //1 second timeout clock
+#define WAIT_FOR_SCAN_REQ                          300  //Wait for all scan requests to come through before advertising connectable
 
 // Discovey mode (limited, general, all)
 #define DEFAULT_DISCOVERY_MODE                DEVDISC_MODE_ALL
 
 // TRUE to use active scan
 #define DEFAULT_DISCOVERY_ACTIVE_SCAN         TRUE
+#define DEFAULT_DISCOVERY_PASSIVE_SCAN        TRUE
 
 // TRUE to use white list during discovery
 #define DEFAULT_DISCOVERY_WHITE_LIST          FALSE
@@ -176,11 +182,11 @@ Release Date: 2017-05-02 17:08:44
 #define MR_PAIRING_STATE_EVT                 Event_Id_04
 #define MR_PASSCODE_NEEDED_EVT               Event_Id_05
 #define MR_PERIODIC_EVT                      Event_Id_06
-#define MR_START_EVT               Event_Id_07
+#define MR_START_EVT                         Event_Id_07
 #define SBC_DISCOVERED_EVT                   Event_Id_08
-#define SBC_START_TIME_SYNC_EVT              Event_Id_09
-#define SBC_TIMEOUT_EVT                      Event_Id_10
-#define MR_STOP_ADVERTISING_EVT              Event_Id_11
+#define TSYNC_CONNECT_EVT                    Event_Id_09
+#define DIR_ADV_TIMEOUT_EVT                  Event_Id_10
+#define SCAN_REQUEST_TIMEOUT_EVT             Event_Id_11
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -193,9 +199,9 @@ Release Date: 2017-05-02 17:08:44
                                              MR_PASSCODE_NEEDED_EVT  | \
                                              MR_START_EVT  | \
                                              SBC_DISCOVERED_EVT      | \
-                                             SBC_START_TIME_SYNC_EVT | \
-                                             SBC_TIMEOUT_EVT         | \
-                                             MR_STOP_ADVERTISING_EVT)
+                                             TSYNC_CONNECT_EVT       | \
+                                             DIR_ADV_TIMEOUT_EVT     | \
+                                             SCAN_REQUEST_TIMEOUT_EVT)
 
 // Discovery states
 typedef enum {
@@ -255,6 +261,9 @@ typedef struct
   uint8_t addrType;                 // Address Type: @ref ADDRTYPE_DEFINES
   uint8_t addr[B_ADDR_LEN];         // Device's Address
   uint8_t strAddr[B_STR_ADDR_LEN];  // Device Address as String
+
+  uint8_t bleChan;                  //For scan request information
+  int8_t rssi;                      //RSSI value of scan requester
 } mrDevRec_t;
 
 // entry to map index to connection handle and store address string for menu module
@@ -309,12 +318,24 @@ enum tsync_role_t{
 };
 
 enum dev_state_t{
-  UNSYNCED,
+  UNSYNCED_PASSIVE_ADV,
+  UNSYNCED_DIR_ADV,
   SYNCING,
   SYNCED_SCANNING,
   SYNCED_ADV
 };
 
+enum mr_adv_type_t{
+    NOT_ADV,
+    CONNECTABLE_ADV,
+    NON_CONNECTABLE_ADV
+};
+
+//List to store the scan request information at one place
+static mrDevRec_t scanReqList[DEFAULT_MAX_SCAN_REQ];
+static int numScanRequests;
+
+static enum mr_adv_type_t mr_adv_type = NOT_ADV;
 // Number of scan results and scan result index
 static uint8_t scanRes = 0;
 static int8_t scanIdx = -1;
@@ -330,8 +351,14 @@ static uint64_t Tsync_T2_recv = 0;
 
 static enum tsync_state_t tsync_state = TSYNC_STATE_NONE;
 static enum tsync_role_t tsync_role = TSYNC_ROLE_NONE;
-//static enum dev_state_t dev_state = SYNCED_SCANNING;
-static enum dev_state_t dev_state = UNSYNCED;
+
+//#define MASTER_NODE
+#ifdef MASTER_NODE
+  static enum dev_state_t dev_state = SYNCED_SCANNING;
+#else
+  static enum dev_state_t dev_state = UNSYNCED_PASSIVE_ADV;
+#endif
+
 //Information about slave trying to sync with host
 static mrDevRec_t *tsync_slave = NULL;
 
@@ -343,7 +370,7 @@ static PIN_State ledPinState;
 static Clock_Struct periodicClock;
 static Clock_Struct discoveredClock;
 static Clock_Struct timeoutClock;
-static Clock_Struct advertisingClock;
+static Clock_Struct passiveAdvertisingClock;
 
 /*
  * Initial LED pin configuration table
@@ -383,13 +410,6 @@ static uint8_t scanRspData[] =
   GAP_ADTYPE_POWER_LEVEL,
   0,       // 0dBm
 
-  //Custom data, timestamp in this case
-  11,
-  GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-  LO_UINT16(MY_MANUFACTURER_ID_0),
-  HI_UINT16(MY_MANUFACTURER_ID_0),
-  0,0,0,0,0,0,0,0,
-
 };
 
 // GAP - Advertisement data (max size = 31 bytes, though this is
@@ -414,8 +434,17 @@ static uint8_t advertData[] =
   GAP_ADTYPE_MANUFACTURER_SPECIFIC,
   LO_UINT16(MY_MANUFACTURER_ID_1),
   HI_UINT16(MY_MANUFACTURER_ID_1),
-  TIME_SYNC_START
+  TIME_SYNC_START,
+
+  //Custom data, timestamp in this case
+  11,
+  GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+  LO_UINT16(MY_MANUFACTURER_ID_0),
+  HI_UINT16(MY_MANUFACTURER_ID_0),
+  0,0,0,0,0,0,0,0,
 };
+
+#define MSG_TYPE_POS 11
 
 // pointer to allocate the connection handle map
 static connHandleMapEntry_t *connHandleMap;
@@ -502,11 +531,17 @@ static void multi_role_clockHandler(UArg arg);
 static void SimpleBLECentral_startPeriodicHandler(UArg a0);
 static void SimpleBLECentral_startDiscoveredHandler(UArg a0);
 static void SimpleBLECentral_startTimeoutHandler(UArg a0);
-static void SimpleBLEPeripheral_stopAdvertisingHandler(UArg arg);
+static void ScanRequestTimeoutHandler(UArg a0);
 static void SimpleBLECentral_initTimeSync(uint8_t *pAddr);
-static void SimpleBLECentral_update_adv(uint64_t *time_ptr);
-static void SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType);
+static bool SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType);
 static uint64_t get_curr_time(void);
+static bool mr_startAdvertising(uint8_t connectable, uint8_t *peerAddr);
+static bool mr_stopAdvertising(void);
+static bool mr_startScanning(uint8_t active_scan);
+static bool mr_stopScanning(void);
+static int addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport);
+static void resetScanReqReceivedList(void);
+static uint8_t *pick_dir_adv_peer(void);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -587,10 +622,6 @@ static void multi_role_init(void)
   // Create an RTOS queue for message from profile to be sent to app.
   appMsgQueue = Util_constructQueue(&appMsg);
 
-  // Create one-shot clocks for internal periodic events.
-  //til_constructClock(&periodicClock, multi_role_clockHandler,
-  //                    MR_PERIODIC_EVT_PERIOD, 0, false, MR_PERIODIC_EVT);
-
   // Init keys and LCD
   Board_initKeys(multi_role_keyChangeHandler);
   // Open Display.
@@ -618,8 +649,10 @@ static void multi_role_init(void)
   }
 
   // Sertup the global clock that runs periodically every 1 millisecond starting now
+#ifdef MASTER_NODE
    Util_constructClock(&periodicClock, SimpleBLECentral_startPeriodicHandler,
                        PERIODIC_GLOBAL_CLOCK_DELAY, PERIODIC_GLOBAL_CLOCK_DELAY, false, 0);
+#endif
 
    // Sertup the discovered clock that runs for a while after a discovery event
    Util_constructClock(&discoveredClock, SimpleBLECentral_startDiscoveredHandler,
@@ -630,8 +663,8 @@ static void multi_role_init(void)
                          TIMEOUT_CLOCK_DELAY, 0, false, 0);
 
    //Start one-shot clock for advertising interval
-   Util_constructClock(&advertisingClock, SimpleBLEPeripheral_stopAdvertisingHandler,
-                           SBP_ADVERTISING_INTERVAL, 0, false, 0);
+   Util_constructClock(&passiveAdvertisingClock, ScanRequestTimeoutHandler,
+                           WAIT_FOR_DELAY_REQ, 0, false, 0);
 
   // Setup the GAP
   {
@@ -896,19 +929,40 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
         }
       }
       switch(dev_state){
-        case UNSYNCED:
-          if (events & MR_START_EVT)
-          {
-            //Start Advertising now
-            PIN_setOutputValue(ledPinHandle, Board_RLED, 1); //Turn on advertising
-            mr_doAdvertise(0);
+        case UNSYNCED_PASSIVE_ADV:
+          if (events & MR_START_EVT){
+            //Start Advertising in non-connectable,scannable mode now
+            PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
+            mr_startAdvertising(FALSE, NULL);
 
-            Util_startClock(&advertisingClock);
+            Util_startClock(&passiveAdvertisingClock);
+            Display_print0(dispHandle, 20, 0, "Advertising only scannable!");
+            Display_print0(dispHandle, 21, 0, "");
           }
-          if(events & MR_STOP_ADVERTISING_EVT)
-          {
-            PIN_setOutputValue(ledPinHandle, Board_RLED, 0); //Turn off advertising
-            mr_doAdvertise(0);
+          else if(events & SCAN_REQUEST_TIMEOUT_EVT){
+            //Check if any devices have been added to scan request list
+            if(numScanRequests > 0){
+              uint8_t *peerAddr = pick_dir_adv_peer();
+
+              //Start direct advertising
+              mr_startAdvertising(TRUE, peerAddr);
+              dev_state = UNSYNCED_DIR_ADV;
+
+              Display_print0(dispHandle, 20, 0, "Direct advertising started!");
+              Util_startClock(&timeoutClock);
+            }else{
+              //Reset the scan request list
+              resetScanReqReceivedList();
+              Util_startClock(&passiveAdvertisingClock);
+            }
+          }
+        break;
+
+        case UNSYNCED_DIR_ADV:
+          if(events & DIR_ADV_TIMEOUT_EVT){
+            //Timed out during direct advertisement
+            dev_state = UNSYNCED_PASSIVE_ADV;
+            Display_print0(dispHandle, 21, 0, "Direct advertising timed out!");
           }
         break;
 
@@ -917,66 +971,39 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
             case TSYNC_STATE_NONE:
               if(events &  MR_START_EVT){
                 //Display_print1(dispHandle, 17, 0, "clock: %u", global_clock);
-                Display_print0(dispHandle, 16, 0, "Started scanning!");
+                Display_print0(dispHandle, 16, 0, "Started Passive scanning!");
                 Display_print0(dispHandle, 17, 0, "");
                 Display_print0(dispHandle, 18, 0, "");
-                //Start scanning now
+
+                //Start passive scanning now
                 PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
-                mr_doScan(0);
+                mr_startScanning(FALSE);
               }
-
-              if(events & SBC_DISCOVERED_EVT){
-                //Turn off Green LED
-                PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
-              }
-
-              if(events & SBC_START_TIME_SYNC_EVT){
+              else if(events & TSYNC_CONNECT_EVT){
                 Display_print0(dispHandle, 17, 0, "Time sync has started!");
                 PIN_setOutputValue(ledPinHandle, Board_RLED, 0); //Turn off scanning
 
-                //Stop scanning
-                mr_doScan(0);
+                //Stop passive scanning
+                mr_stopScanning();
                 Display_print0(dispHandle, 16, 0, "");
-                tsync_role = MASTER;
 
+                //Start connecting with slave peer
+                mr_doConnect(0);
 
-                Tsync_T1 = get_curr_time();
-                //Update advertising parameters, get global clock
-                SimpleBLECentral_update_adv(&Tsync_T1);
-
-                //Start Advertising now
-                mr_doAdvertise(0);
-                tsync_state = SYNC_REQ_SENT;
-
-                //Start max timeout clock
+                //Start max timeout clock to potentially connect
                 Util_startClock(&timeoutClock);
+              }
+              else if(events & SBC_DISCOVERED_EVT){
+                //Turn off Green LED
+                PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
               }
             break;
 
             case SYNC_REQ_SENT:
-              if(events & SBC_TIMEOUT_EVT){
-                tsync_state = TSYNC_STATE_NONE;
-                tsync_role = TSYNC_ROLE_NONE;
-                tsync_slave = NULL;
-
-                //Stop advertising
-                mr_doAdvertise(0);
-                Display_print0(dispHandle, 18, 0, "Timed out time syncing!");
-                break;
-              }
             break;
         }
         break;
       }
-
-
-      /*if (events & MR_PERIODIC_EVT)
-      {
-        Util_startClock(&periodicClock);
-
-        // Perform periodic application task
-        multi_role_performPeriodicTask();
-      }*/
     }
   }
 }
@@ -1058,7 +1085,10 @@ static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg)
               if (scanRequestReport->BLEEventCode == HCI_BLE_SCAN_REQ_REPORT_EVENT)
               {
                 // process ScanRequestReport here
-                  Display_print0(dispHandle, 20, 0, "Found a scan request!");
+                Display_print0(dispHandle, 20, 0, "Found a scan request!");
+
+                //Add device to info list
+                addToScanReqReceivedList(scanRequestReport);
               }
             }
             break;
@@ -1380,12 +1410,15 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       // Set device info characteristic
       DevInfo_SetParameter(DEVINFO_SYSTEM_ID, DEVINFO_SYSTEM_ID_LEN, pEvent->initDone.devAddr);
 
+    #ifdef MASTER_NODE
+      //Start periodic clock here
+      Util_startClock(&periodicClock);
+    #else
       //Configure the Scan Reuest report HCI command
       HCI_EXT_ScanReqRptCmd(HCI_EXT_ENABLE_SCAN_REQUEST_REPORT);
 
-      //Start periodic clock here
-      Util_startClock(&periodicClock);
-
+      Event_post(syncEvent, MR_START_EVT);
+    #endif
     }
     break;
 
@@ -1414,12 +1447,25 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
     // A discovered device report
     case GAP_DEVICE_INFO_EVENT:
     {
-      SimpleBLECentral_addDeviceInfo(pEvent->deviceInfo.addr,
-                                       pEvent->deviceInfo.addrType);
-     if(pEvent->deviceInfo.pEvtData[11] == TIME_SYNC_START)
-        SimpleBLECentral_initTimeSync(pEvent->deviceInfo.addr);
-      PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
-      Util_startClock(&discoveredClock);
+      //Check if it is an advertisement or scan response packet
+      if(pEvent->deviceInfo.eventType == GAP_ADRPT_SCAN_RSP){
+        //Scan response packet
+        Display_print0(dispHandle, 21, 0, "Scan response received!");
+      }else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_DIRECT_IND){
+        if(SimpleBLECentral_addDeviceInfo(pEvent->deviceInfo.addr,
+                                       pEvent->deviceInfo.addrType)){
+           //New device added
+          if(pEvent->deviceInfo.pEvtData[MSG_TYPE_POS] == TIME_SYNC_START){
+            SimpleBLECentral_initTimeSync(pEvent->deviceInfo.addr);
+            Event_post(syncEvent, TSYNC_CONNECT_EVT);
+          }
+
+          PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
+          Util_startClock(&discoveredClock);
+
+          Display_print0(dispHandle, 21, 0, "Direct advertising packet received!");
+        }
+      }
     }
     break;
 
@@ -1484,7 +1530,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         connecting = FALSE;
 
         // Add index-to-connHandle mapping entry and update menus
-        uint8_t index = multi_role_addMappingEntry(pEvent->linkCmpl.connectionHandle, pEvent->linkCmpl.devAddr);
+        /*uint8_t index = multi_role_addMappingEntry(pEvent->linkCmpl.connectionHandle, pEvent->linkCmpl.devAddr);
 
         //turn off advertising if no available links
         if (linkDB_NumActive() >= maxNumBleConns)
@@ -1498,16 +1544,19 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         Display_print0(dispHandle, MR_ROW_STATUS2, 0, (char*)connHandleMap[index].strAddr);
 
         // Return to main menu
-        tbm_goTo(&mrMenuMain);
+        tbm_goTo(&mrMenuMain);*/
 
         // Start service discovery
         multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
 
         // Start periodic clock if this is the first connection
-        if (linkDB_NumActive() == 1)
+        /*if (linkDB_NumActive() == 1)
         {
           Util_startClock(&periodicClock);
-        }
+        }*/
+
+        //Turn on Green LED
+        PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
       }
       // If the connection was not successfully established
       else
@@ -1521,6 +1570,9 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
     // Connection has been terminated
     case GAP_LINK_TERMINATED_EVENT:
     {
+      //Turn off Green LED
+      PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
+
       // read current num active so that this doesn't change before this event is processed
       uint8_t currentNumActive = linkDB_NumActive();
 
@@ -1538,7 +1590,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         discInfo[connIndex].charHdl = 0;
 
         // Disable connection item from connectable menus
-        tbm_setItemStatus(&mrMenuGattRw, TBM_ITEM_NONE, (1 << connIndex));
+        /*tbm_setItemStatus(&mrMenuGattRw, TBM_ITEM_NONE, (1 << connIndex));
         tbm_setItemStatus(&mrMenuConnUpdate, TBM_ITEM_NONE, (1 << connIndex));
         tbm_setItemStatus(&mrMenuDisconnect, TBM_ITEM_NONE, (1 << connIndex));
 
@@ -1551,18 +1603,18 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
 
           // Stop periodic clock
           Util_stopClock(&periodicClock);
-        }
+        }*/
 
         // Clear screen
         Display_print1(dispHandle, MR_ROW_CONN_STATUS, 0, "Connected to %d", linkDB_NumActive());
         Display_print0(dispHandle, MR_ROW_STATUS1, 0, "Disconnected!");
 
         // If it is possible to advertise again
-        if (currentNumActive == (maxNumBleConns-1))
+        /*if (currentNumActive == (maxNumBleConns-1))
         {
           Display_print0(dispHandle, MR_ROW_ADV, 0, "Ready to Advertise");
           Display_print0(dispHandle, MR_ROW_STATUS2, 0, "Ready to Scan");
-        }
+        }*/
       }
     }
     break;
@@ -2138,6 +2190,40 @@ bool mr_doScan(uint8_t index)
   return TRUE;
 }
 
+//Start scanning according to mode given in the argument
+static bool mr_startScanning(uint8_t active_scan)
+{
+  if(!scanningStarted){
+    if(active_scan){
+      // Start Actively scanning
+      GAPRole_StartDiscovery(DEFAULT_DISCOVERY_MODE,
+                      DEFAULT_DISCOVERY_ACTIVE_SCAN, DEFAULT_DISCOVERY_WHITE_LIST);
+      Display_print0(dispHandle, MR_ROW_STATUS1, 0, "Actively Scanning...");
+    }else{
+      //Passivey scanning
+      GAPRole_StartDiscovery(DEFAULT_DISCOVERY_MODE,
+                              DEFAULT_DISCOVERY_PASSIVE_SCAN, DEFAULT_DISCOVERY_WHITE_LIST);
+      Display_print0(dispHandle, MR_ROW_STATUS1, 0, "Passively Scanning...");
+    }
+    scanningStarted = TRUE;
+    return TRUE;
+  }
+  return FALSE;
+}
+
+//Stop scanning
+static bool mr_stopScanning(void)
+{
+  if(scanningStarted){
+    // Cancel scanning
+    GAPRole_CancelDiscovery();
+    Display_print0(dispHandle, MR_ROW_STATUS1, 0, "Discovery Cancelled");
+    return TRUE;
+  }
+
+  return FALSE;
+}
+
 /*********************************************************************
 * @fn      mr_doConnect
 *
@@ -2163,14 +2249,18 @@ bool mr_doConnect(uint8_t index)
   else
   {
     // Connect to current device in scan result
-    GAPRole_EstablishLink(DEFAULT_LINK_HIGH_DUTY_CYCLE,
+    /*GAPRole_EstablishLink(DEFAULT_LINK_HIGH_DUTY_CYCLE,
                           DEFAULT_LINK_WHITE_LIST,
-                          devList[index].addrType, devList[index].addr);
+                          devList[index].addrType, devList[index].addr);*/
+    GAPRole_EstablishLink(DEFAULT_LINK_HIGH_DUTY_CYCLE,
+                                DEFAULT_LINK_WHITE_LIST,
+                                tsync_slave->addrType, tsync_slave->addr);
 
     // Set connecting state flag
     connecting = TRUE;
     Display_print0(dispHandle, MR_ROW_STATUS1, 0, "Connecting to:");
-    Display_print0(dispHandle, MR_ROW_STATUS2, 0, (char*)devList[index].strAddr);
+    //Display_print0(dispHandle, MR_ROW_STATUS2, 0, (char*)devList[index] .strAddr);
+    Display_print0(dispHandle, MR_ROW_STATUS2, 0, (char*)(tsync_slave->strAddr));
   }
 
   return TRUE;
@@ -2295,31 +2385,76 @@ bool mr_doDisconnect(uint8_t index)
   return TRUE;
 }
 
-/* Actions for Menu: Init - Advertise */
-bool mr_doAdvertise(uint8_t index)
+//Stop advertising
+static bool mr_stopAdvertising(void){
+  uint8_t adv = FALSE;
+  if(mr_adv_type == CONNECTABLE_ADV){
+    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
+  }else if(mr_adv_type == NON_CONNECTABLE_ADV){
+    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
+  }
+  mr_adv_type = NOT_ADV;
+  return TRUE;
+}
+
+//Start advertising, parameter says whether this
+//is connectable or non-connectable mode
+static bool mr_startAdvertising(uint8_t connectable, uint8_t *peerAddr)
 {
-  (void) index;
-  uint8_t adv;
-  uint8_t adv_status;
+  uint8_t adv = TRUE;
+  uint8_t advType;
+  switch(mr_adv_type){
+    case NOT_ADV: //current state
+      if(connectable){
+        advType = GAP_ADTYPE_ADV_HDC_DIRECT_IND;
+        GAPRole_SetParameter(GAPROLE_ADV_DIRECT_ADDR, B_ADDR_LEN, peerAddr, NULL);
+        GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
+        mr_adv_type = CONNECTABLE_ADV;
+      }
+      else{
+        advType = GAP_ADTYPE_ADV_SCAN_IND;
+        GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
+        mr_adv_type = NON_CONNECTABLE_ADV;
+      }
+      GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
+    break;
+    case CONNECTABLE_ADV:
+      if(!connectable){ //Switch to non-connectable  scannable advertising
+        //Stop advertising first
+        adv = FALSE;
+        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED,sizeof(uint8_t), &adv, NULL);
 
-  // Get current advertising status
-  GAPRole_GetParameter(GAPROLE_ADVERT_ENABLED, &adv_status, NULL);
+        //Restart advertising in non connectable mode
+        adv = TRUE;
+        advType = GAP_ADTYPE_ADV_SCAN_IND;
+        GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
+        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
 
-  // If we're currently advertising
-  if (adv_status)
-  {
-    // Turn off advertising
-    adv = FALSE;
-    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
+        mr_adv_type = NON_CONNECTABLE_ADV;
+      }
+    break;
+    case NON_CONNECTABLE_ADV:
+      if(connectable){
+        //Stop advertising first
+        adv = FALSE;
+        GAPRole_SetParameter(GAPROLE_ADV_NONCONN_ENABLED, sizeof(uint8_t), &adv, NULL);
+
+        //Restart advertising in connectable mode
+        adv = TRUE;
+        advType = GAP_ADTYPE_ADV_HDC_DIRECT_IND;
+        GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
+        GAPRole_SetParameter(GAPROLE_ADV_DIRECT_ADDR, B_ADDR_LEN, peerAddr, NULL);
+        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
+
+        mr_adv_type = CONNECTABLE_ADV;
+      }
+    break;
   }
-  // If we're not currently advertising
-  else
-  {
-    // Turn on advertising
-    adv = TRUE;
-    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
-  }
+  return TRUE;
+}
 
+//Dummy implementation of the advertise function
+bool mr_doAdvertise(uint8_t index){
   return TRUE;
 }
 
@@ -2341,19 +2476,18 @@ static void SimpleBLECentral_startDiscoveredHandler(UArg a0)
 
 static void SimpleBLECentral_startTimeoutHandler(UArg a0)
 {
-  Event_post(syncEvent, SBC_TIMEOUT_EVT);
+  Event_post(syncEvent, DIR_ADV_TIMEOUT_EVT);
 }
 
-static void SimpleBLEPeripheral_stopAdvertisingHandler(UArg arg)
+static void ScanRequestTimeoutHandler(UArg arg)
 {
-  Event_post(syncEvent, MR_STOP_ADVERTISING_EVT);
+  Event_post(syncEvent, SCAN_REQUEST_TIMEOUT_EVT);
 }
 
-//Initiate Time sync protocol
+//Initiate Time sync protocol with peer address
 static void SimpleBLECentral_initTimeSync(uint8_t *pAddr)
 {
   //Save this device addr
-  // Check if device is already in scan results
   if(tsync_slave != NULL)
     return;
   for (int i = 0; i < scanRes; i++)
@@ -2366,26 +2500,10 @@ static void SimpleBLECentral_initTimeSync(uint8_t *pAddr)
   }
   if(tsync_slave == NULL)
     return;
-
-  //Post a start_time_sync message
-  Event_post(syncEvent, SBC_START_TIME_SYNC_EVT);
 }
 
-static void SimpleBLECentral_update_adv(uint64_t *time_ptr)
-{
-  //Get clock value
-  uint_t key = Swi_disable();
-  *time_ptr = global_clock;
-  Swi_restore(key);
-
-  //Memset the time
-  memcpy(&advertData[19],(void *)time_ptr,8);
-
-  //Update advertising parameters
-  GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
-}
-
-static void SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType)
+/* Add device to scan list only if not already in the list */
+static bool SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType)
 {
   uint8_t i;
 
@@ -2397,7 +2515,7 @@ static void SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType)
     {
       if (memcmp(pAddr, devList[i].addr , B_ADDR_LEN) == 0)
       {
-        return;
+        return FALSE;
       }
     }
 
@@ -2407,9 +2525,61 @@ static void SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType)
 
     // Increment scan result count
     scanRes++;
+    return TRUE;
   }
+
+  return FALSE;
 }
 
+//Add scan requester information to list
+static int addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport)
+{
+  if(numScanRequests == DEFAULT_MAX_SCAN_REQ)
+    return -1;
+  uint8_t *peerAddr = scanRequestReport->peerAddr;
+  for(int i = 0; i < numScanRequests; i++){
+    if(memcmp(peerAddr, &scanReqList[i], B_ADDR_LEN)== 0){
+      //Device already exists in the list
+      return -1;
+    }
+  }
+  Display_print0(dispHandle, 21, 0, "Hello moto!");
+
+  //Store Scan Requester information
+  memcpy(scanReqList[numScanRequests].addr, peerAddr, B_ADDR_LEN);
+  scanReqList[numScanRequests].bleChan = scanRequestReport->bleChan;
+  scanReqList[numScanRequests].rssi = scanRequestReport->rssi;
+  scanReqList[numScanRequests].addrType = scanRequestReport->peerAddrType;
+
+  numScanRequests++;
+
+  Display_print1(dispHandle, 21, 0, "Num scan requests: %d", numScanRequests);
+  return 0;
+}
+
+//Reset the scan requests received list
+static void resetScanReqReceivedList(void)
+{
+  memset(&scanReqList[0], 0, DEFAULT_MAX_SCAN_REQ);
+  numScanRequests = 0;
+}
+
+//Pick the peer to perform direct advertisings
+//Peer picked using maximum RSSI value
+static uint8_t *pick_dir_adv_peer(void)
+{
+  if(numScanRequests == 0)
+    return NULL;
+  mrDevRec_t* peer_picked = &scanReqList[0];
+  for(int i = 1; i < numScanRequests; i++){
+    if(scanReqList[i].rssi > peer_picked->rssi){
+      peer_picked = &scanReqList[i];
+    }
+   }
+  return peer_picked->addr;
+}
+
+/* Returns the current millisecond clock time */
 static uint64_t get_curr_time(void)
 {
   uint64_t curr_time;
