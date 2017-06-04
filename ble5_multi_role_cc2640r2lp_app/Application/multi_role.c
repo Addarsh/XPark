@@ -105,8 +105,8 @@ Release Date: 2017-05-02 17:08:44
 #define DEFAULT_DISCOVERABLE_MODE             GAP_ADTYPE_FLAGS_GENERAL
 
 // Connection parameters
-#define DEFAULT_CONN_INT                      200
-#define DEFAULT_CONN_TIMEOUT                  1000
+#define DEFAULT_CONN_INT                      20
+#define DEFAULT_CONN_TIMEOUT                  200
 #define DEFAULT_CONN_LATENCY                  0
 
 // Default service discovery timer delay in ms
@@ -536,7 +536,6 @@ static void SimpleBLECentral_initTimeSync(uint8_t *pAddr);
 static bool SimpleBLECentral_addDeviceInfo(uint8_t *pAddr, uint8_t addrType);
 static uint64_t get_curr_time(void);
 static bool mr_startAdvertising(uint8_t connectable, uint8_t *peerAddr);
-static bool mr_stopAdvertising(void);
 static bool mr_startScanning(uint8_t active_scan);
 static bool mr_stopScanning(void);
 static int addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport);
@@ -944,12 +943,15 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
             if(numScanRequests > 0){
               uint8_t *peerAddr = pick_dir_adv_peer();
 
+              Display_print5(dispHandle, 24,0, "Peer addr: 0x%x,0x%x,0x%x,0x%x,0x%x\n",
+                             peerAddr[0],peerAddr[1],peerAddr[2],peerAddr[3],peerAddr[4]);
+
               //Start direct advertising
               mr_startAdvertising(TRUE, peerAddr);
               dev_state = UNSYNCED_DIR_ADV;
 
               Display_print0(dispHandle, 20, 0, "Direct advertising started!");
-              Util_startClock(&timeoutClock);
+              //Util_startClock(&timeoutClock);
             }else{
               //Reset the scan request list
               resetScanReqReceivedList();
@@ -1530,7 +1532,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         connecting = FALSE;
 
         // Add index-to-connHandle mapping entry and update menus
-        /*uint8_t index = multi_role_addMappingEntry(pEvent->linkCmpl.connectionHandle, pEvent->linkCmpl.devAddr);
+        uint8_t index = multi_role_addMappingEntry(pEvent->linkCmpl.connectionHandle, pEvent->linkCmpl.devAddr);
 
         //turn off advertising if no available links
         if (linkDB_NumActive() >= maxNumBleConns)
@@ -1544,16 +1546,16 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         Display_print0(dispHandle, MR_ROW_STATUS2, 0, (char*)connHandleMap[index].strAddr);
 
         // Return to main menu
-        tbm_goTo(&mrMenuMain);*/
+        tbm_goTo(&mrMenuMain);
 
         // Start service discovery
         multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
 
         // Start periodic clock if this is the first connection
-        /*if (linkDB_NumActive() == 1)
+        if (linkDB_NumActive() == 1)
         {
-          Util_startClock(&periodicClock);
-        }*/
+         // Util_startClock(&periodicClock);
+        }
 
         //Turn on Green LED
         PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
@@ -1590,7 +1592,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         discInfo[connIndex].charHdl = 0;
 
         // Disable connection item from connectable menus
-        /*tbm_setItemStatus(&mrMenuGattRw, TBM_ITEM_NONE, (1 << connIndex));
+        tbm_setItemStatus(&mrMenuGattRw, TBM_ITEM_NONE, (1 << connIndex));
         tbm_setItemStatus(&mrMenuConnUpdate, TBM_ITEM_NONE, (1 << connIndex));
         tbm_setItemStatus(&mrMenuDisconnect, TBM_ITEM_NONE, (1 << connIndex));
 
@@ -1603,18 +1605,18 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
 
           // Stop periodic clock
           Util_stopClock(&periodicClock);
-        }*/
+        }
 
         // Clear screen
         Display_print1(dispHandle, MR_ROW_CONN_STATUS, 0, "Connected to %d", linkDB_NumActive());
         Display_print0(dispHandle, MR_ROW_STATUS1, 0, "Disconnected!");
 
         // If it is possible to advertise again
-        /*if (currentNumActive == (maxNumBleConns-1))
+        if (currentNumActive == (maxNumBleConns-1))
         {
           Display_print0(dispHandle, MR_ROW_ADV, 0, "Ready to Advertise");
           Display_print0(dispHandle, MR_ROW_STATUS2, 0, "Ready to Scan");
-        }*/
+        }
       }
     }
     break;
@@ -2385,17 +2387,6 @@ bool mr_doDisconnect(uint8_t index)
   return TRUE;
 }
 
-//Stop advertising
-static bool mr_stopAdvertising(void){
-  uint8_t adv = FALSE;
-  if(mr_adv_type == CONNECTABLE_ADV){
-    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
-  }else if(mr_adv_type == NON_CONNECTABLE_ADV){
-    GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
-  }
-  mr_adv_type = NOT_ADV;
-  return TRUE;
-}
 
 //Start advertising, parameter says whether this
 //is connectable or non-connectable mode
@@ -2406,7 +2397,8 @@ static bool mr_startAdvertising(uint8_t connectable, uint8_t *peerAddr)
   switch(mr_adv_type){
     case NOT_ADV: //current state
       if(connectable){
-        advType = GAP_ADTYPE_ADV_HDC_DIRECT_IND;
+        //advType = GAP_ADTYPE_ADV_HDC_DIRECT_IND;
+        advType = GAP_ADTYPE_ADV_IND;
         GAPRole_SetParameter(GAPROLE_ADV_DIRECT_ADDR, B_ADDR_LEN, peerAddr, NULL);
         GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
         mr_adv_type = CONNECTABLE_ADV;
@@ -2437,13 +2429,14 @@ static bool mr_startAdvertising(uint8_t connectable, uint8_t *peerAddr)
       if(connectable){
         //Stop advertising first
         adv = FALSE;
-        GAPRole_SetParameter(GAPROLE_ADV_NONCONN_ENABLED, sizeof(uint8_t), &adv, NULL);
+        GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
 
         //Restart advertising in connectable mode
         adv = TRUE;
-        advType = GAP_ADTYPE_ADV_HDC_DIRECT_IND;
+        //advType = GAP_ADTYPE_ADV_HDC_DIRECT_IND;
+        advType = GAP_ADTYPE_ADV_IND;
         GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
-        GAPRole_SetParameter(GAPROLE_ADV_DIRECT_ADDR, B_ADDR_LEN, peerAddr, NULL);
+        //GAPRole_SetParameter(GAPROLE_ADV_DIRECT_ADDR, B_ADDR_LEN, peerAddr, NULL);
         GAPRole_SetParameter(GAPROLE_ADVERT_ENABLED, sizeof(uint8_t), &adv, NULL);
 
         mr_adv_type = CONNECTABLE_ADV;
@@ -2538,12 +2531,11 @@ static int addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport
     return -1;
   uint8_t *peerAddr = scanRequestReport->peerAddr;
   for(int i = 0; i < numScanRequests; i++){
-    if(memcmp(peerAddr, &scanReqList[i], B_ADDR_LEN)== 0){
+    if(memcmp(peerAddr, &(scanReqList[i].addr), B_ADDR_LEN)== 0){
       //Device already exists in the list
       return -1;
     }
   }
-  Display_print0(dispHandle, 21, 0, "Hello moto!");
 
   //Store Scan Requester information
   memcpy(scanReqList[numScanRequests].addr, peerAddr, B_ADDR_LEN);
@@ -2551,6 +2543,8 @@ static int addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport
   scanReqList[numScanRequests].rssi = scanRequestReport->rssi;
   scanReqList[numScanRequests].addrType = scanRequestReport->peerAddrType;
 
+  Display_print5(dispHandle, 23,0, "furstt Peer addr: 0x%x,0x%x,0x%x,0x%x,0x%x\n",
+                               peerAddr[0],peerAddr[1],peerAddr[2],peerAddr[3],peerAddr[4]);
   numScanRequests++;
 
   Display_print1(dispHandle, 21, 0, "Num scan requests: %d", numScanRequests);
