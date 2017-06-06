@@ -105,8 +105,8 @@ Release Date: 2017-05-02 17:08:44
 #define DEFAULT_DISCOVERABLE_MODE             GAP_ADTYPE_FLAGS_GENERAL
 
 // Connection parameters
-#define DEFAULT_CONN_INT                      20
-#define DEFAULT_CONN_TIMEOUT                  200
+#define DEFAULT_CONN_INT                      8
+#define DEFAULT_CONN_TIMEOUT                  1000
 #define DEFAULT_CONN_LATENCY                  0
 
 // Default service discovery timer delay in ms
@@ -184,7 +184,7 @@ Release Date: 2017-05-02 17:08:44
 #define MR_PERIODIC_EVT                      Event_Id_06
 #define MR_START_EVT                         Event_Id_07
 #define SBC_DISCOVERED_EVT                   Event_Id_08
-#define TSYNC_CONNECT_EVT                    Event_Id_09
+#define TSYNC_START_CONNECT_EVT              Event_Id_09
 #define DIR_ADV_TIMEOUT_EVT                  Event_Id_10
 #define SCAN_REQUEST_TIMEOUT_EVT             Event_Id_11
 
@@ -199,7 +199,7 @@ Release Date: 2017-05-02 17:08:44
                                              MR_PASSCODE_NEEDED_EVT  | \
                                              MR_START_EVT  | \
                                              SBC_DISCOVERED_EVT      | \
-                                             TSYNC_CONNECT_EVT       | \
+                                             TSYNC_START_CONNECT_EVT       | \
                                              DIR_ADV_TIMEOUT_EVT     | \
                                              SCAN_REQUEST_TIMEOUT_EVT)
 
@@ -301,6 +301,7 @@ enum Msg_type{
 //States during time sync
 enum tsync_state_t{
   TSYNC_STATE_NONE,
+  TSYNC_CONNECTED,
   SYNC_REQ_SENT,
   WAIT_FOR_SYNC_REQ,
   SYNC_RESP_SENT,
@@ -981,7 +982,7 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
                 PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
                 mr_startScanning(FALSE);
               }
-              else if(events & TSYNC_CONNECT_EVT){
+              else if(events & TSYNC_START_CONNECT_EVT){
                 Display_print0(dispHandle, 17, 0, "Time sync has started!");
                 PIN_setOutputValue(ledPinHandle, Board_RLED, 0); //Turn off scanning
 
@@ -999,6 +1000,11 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
                 //Turn off Green LED
                 PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
               }
+            break;
+
+            case TSYNC_CONNECTED:
+              //Send current time => This will be a write command
+              get_curr_time();
             break;
 
             case SYNC_REQ_SENT:
@@ -1452,20 +1458,18 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       //Check if it is an advertisement or scan response packet
       if(pEvent->deviceInfo.eventType == GAP_ADRPT_SCAN_RSP){
         //Scan response packet
-        Display_print0(dispHandle, 21, 0, "Scan response received!");
-      }else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_DIRECT_IND){
+
+      }else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_IND){
         if(SimpleBLECentral_addDeviceInfo(pEvent->deviceInfo.addr,
                                        pEvent->deviceInfo.addrType)){
            //New device added
           if(pEvent->deviceInfo.pEvtData[MSG_TYPE_POS] == TIME_SYNC_START){
             SimpleBLECentral_initTimeSync(pEvent->deviceInfo.addr);
-            Event_post(syncEvent, TSYNC_CONNECT_EVT);
+            Event_post(syncEvent, TSYNC_START_CONNECT_EVT);
           }
 
           PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
           Util_startClock(&discoveredClock);
-
-          Display_print0(dispHandle, 21, 0, "Direct advertising packet received!");
         }
       }
     }
@@ -1559,6 +1563,8 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
 
         //Turn on Green LED
         PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
+
+        tsync_state = TSYNC_CONNECTED;
       }
       // If the connection was not successfully established
       else
@@ -1574,6 +1580,8 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
     {
       //Turn off Green LED
       PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
+
+      Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Reason code for disconnect: %d", pEvent->gap.hdr.status);
 
       // read current num active so that this doesn't change before this event is processed
       uint8_t currentNumActive = linkDB_NumActive();

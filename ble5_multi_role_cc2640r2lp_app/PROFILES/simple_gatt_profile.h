@@ -67,6 +67,7 @@ extern "C"
 #define SIMPLEPROFILE_CHAR3                   2  // RW uint8 - Profile Characteristic 3 value
 #define SIMPLEPROFILE_CHAR4                   3  // RW uint8 - Profile Characteristic 4 value
 #define SIMPLEPROFILE_CHAR5                   4  // RW uint8 - Profile Characteristic 4 value
+#define SIMPLEPROFILE_SLAVE_TIME              5  // RW uint8 - Profile Characteristic 6 value
   
 // Simple Profile Service UUID
 #define SIMPLEPROFILE_SERV_UUID               0xFFF0
@@ -77,12 +78,14 @@ extern "C"
 #define SIMPLEPROFILE_CHAR3_UUID            0xFFF3
 #define SIMPLEPROFILE_CHAR4_UUID            0xFFF4
 #define SIMPLEPROFILE_CHAR5_UUID            0xFFF5
+#define SIMPLEPROFILE_SLAVE_TIME_UUID       0xFFF6
   
 // Simple Keys Profile Services bit fields
 #define SIMPLEPROFILE_SERVICE               0x00000001
 
 // Length of Characteristic 5 in bytes
 #define SIMPLEPROFILE_CHAR5_LEN           5  
+#define SIMPLEPROFILE_SLAVE_TIME_LEN      8  //8 bytes because time is in uint64_t
 
 /*********************************************************************
  * TYPEDEFS

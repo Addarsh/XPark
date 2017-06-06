@@ -64,7 +64,7 @@
  * CONSTANTS
  */
 
-#define SERVAPP_NUM_ATTR_SUPPORTED        17
+#define SERVAPP_NUM_ATTR_SUPPORTED        20
 
 /*********************************************************************
  * TYPEDEFS
@@ -107,6 +107,12 @@ CONST uint8 simpleProfilechar4UUID[ATT_BT_UUID_SIZE] =
 CONST uint8 simpleProfilechar5UUID[ATT_BT_UUID_SIZE] =
 { 
   LO_UINT16(SIMPLEPROFILE_CHAR5_UUID), HI_UINT16(SIMPLEPROFILE_CHAR5_UUID)
+};
+
+// Characteristic 6 -> slave time: UUID: 0xFFF6
+CONST uint8 simpleProfileSlaveTimeUUID[ATT_BT_UUID_SIZE] =
+{
+  LO_UINT16(SIMPLEPROFILE_SLAVE_TIME_UUID), HI_UINT16(SIMPLEPROFILE_SLAVE_TIME_UUID)
 };
 
 /*********************************************************************
@@ -185,6 +191,16 @@ static uint8 simpleProfileChar5[SIMPLEPROFILE_CHAR5_LEN] = { 0, 0, 0, 0, 0 };
 
 // Simple Profile Characteristic 5 User Description
 static uint8 simpleProfileChar5UserDesp[17] = "Characteristic 5";
+
+
+// Simple Profile Characteristic 6 -> Slave Time Properties
+static uint8 simpleProfileSlaveTimeProps = GATT_PROP_READ;
+
+// Characteristic 6 -> Slave Time Value
+static uint8 simpleProfileSlaveTime[SIMPLEPROFILE_SLAVE_TIME_LEN] = { 0, 0, 0, 0, 0, 0, 0 ,0 };
+
+// Simple Profile Characteristic 6 User Description
+static uint8 simpleProfileSlaveTimeUserDesp[17] = "Slave Time";
 
 /*********************************************************************
  * Profile Attributes - Table
@@ -327,6 +343,30 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
         0, 
         simpleProfileChar5UserDesp 
       },
+
+      // Characteristic 6 -> Slave Time Declaration
+       {
+         { ATT_BT_UUID_SIZE, characterUUID },
+         GATT_PERMIT_READ,
+         0,
+         &simpleProfileSlaveTimeProps
+       },
+
+         // Characteristic Value 6
+         {
+           { ATT_BT_UUID_SIZE, simpleProfileSlaveTimeUUID },
+           GATT_PERMIT_READ | GATT_PERMIT_WRITE,
+           0,
+           simpleProfileSlaveTime
+         },
+
+         // Characteristic 6 User Description
+         {
+           { ATT_BT_UUID_SIZE, charUserDescUUID },
+           GATT_PERMIT_READ,
+           0,
+           simpleProfileSlaveTimeUserDesp
+         },
 };
 
 /*********************************************************************
@@ -618,6 +658,11 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
         *pLen = SIMPLEPROFILE_CHAR5_LEN;
         VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_CHAR5_LEN );
         break;
+
+      case SIMPLEPROFILE_SLAVE_TIME_UUID:
+        *pLen = SIMPLEPROFILE_SLAVE_TIME_LEN;
+         VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_SLAVE_TIME_LEN );
+         break;
         
       default:
         // Should never get here! (characteristics 3 and 4 do not have read permissions)
