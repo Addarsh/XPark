@@ -110,9 +110,9 @@ CONST uint8 simpleProfilechar5UUID[ATT_BT_UUID_SIZE] =
 };
 
 // Characteristic 6 -> slave time: UUID: 0xFFF6
-CONST uint8 simpleProfileSlaveTimeUUID[ATT_BT_UUID_SIZE] =
+CONST uint8 simpleProfileMasterTimeUUID[ATT_BT_UUID_SIZE] =
 {
-  LO_UINT16(SIMPLEPROFILE_SLAVE_TIME_UUID), HI_UINT16(SIMPLEPROFILE_SLAVE_TIME_UUID)
+  LO_UINT16(SIMPLEPROFILE_MASTER_TIME_UUID), HI_UINT16(SIMPLEPROFILE_MASTER_TIME_UUID)
 };
 
 /*********************************************************************
@@ -194,13 +194,13 @@ static uint8 simpleProfileChar5UserDesp[17] = "Characteristic 5";
 
 
 // Simple Profile Characteristic 6 -> Slave Time Properties
-static uint8 simpleProfileSlaveTimeProps = GATT_PROP_READ;
+static uint8 simpleProfileMasterTimeProps = GATT_PROP_READ  | GATT_PROP_WRITE;
 
 // Characteristic 6 -> Slave Time Value
-static uint8 simpleProfileSlaveTime[SIMPLEPROFILE_SLAVE_TIME_LEN] = { 0, 0, 0, 0, 0, 0, 0 ,0 };
+static uint8 simpleProfileMasterTime[SIMPLEPROFILE_MASTER_TIME_LEN] = { 0, 0, 0, 0, 0, 0, 0 ,0 };
 
 // Simple Profile Characteristic 6 User Description
-static uint8 simpleProfileSlaveTimeUserDesp[17] = "Slave Time";
+static uint8 simpleProfileMasterTimeUserDesp[17] = "Slave Time";
 
 /*********************************************************************
  * Profile Attributes - Table
@@ -349,15 +349,15 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
          { ATT_BT_UUID_SIZE, characterUUID },
          GATT_PERMIT_READ,
          0,
-         &simpleProfileSlaveTimeProps
+         &simpleProfileMasterTimeProps
        },
 
          // Characteristic Value 6
          {
-           { ATT_BT_UUID_SIZE, simpleProfileSlaveTimeUUID },
+           { ATT_BT_UUID_SIZE, simpleProfileMasterTimeUUID },
            GATT_PERMIT_READ | GATT_PERMIT_WRITE,
            0,
-           simpleProfileSlaveTime
+           simpleProfileMasterTime
          },
 
          // Characteristic 6 User Description
@@ -365,7 +365,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
            { ATT_BT_UUID_SIZE, charUserDescUUID },
            GATT_PERMIT_READ,
            0,
-           simpleProfileSlaveTimeUserDesp
+           simpleProfileMasterTimeUserDesp
          },
 };
 
@@ -594,7 +594,11 @@ bStatus_t SimpleProfile_GetParameter( uint8 param, void *value )
 
     case SIMPLEPROFILE_CHAR5:
       VOID memcpy( value, simpleProfileChar5, SIMPLEPROFILE_CHAR5_LEN );
-      break;      
+      break;
+
+    case SIMPLEPROFILE_MASTER_TIME:
+      VOID memcpy( value, simpleProfileMasterTime, SIMPLEPROFILE_MASTER_TIME_LEN );
+      break;
       
     default:
       ret = INVALIDPARAMETER;
@@ -659,9 +663,9 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
         VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_CHAR5_LEN );
         break;
 
-      case SIMPLEPROFILE_SLAVE_TIME_UUID:
-        *pLen = SIMPLEPROFILE_SLAVE_TIME_LEN;
-         VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_SLAVE_TIME_LEN );
+      case SIMPLEPROFILE_MASTER_TIME_UUID:
+        *pLen = SIMPLEPROFILE_MASTER_TIME_LEN;
+         VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_MASTER_TIME_LEN );
          break;
         
       default:
@@ -743,6 +747,30 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
         }
              
         break;
+
+      case SIMPLEPROFILE_MASTER_TIME_UUID:
+        //Validate the value
+        // Make sure it's not a blob oper
+        if ( offset == 0 )
+        {
+          if ( len != 8 )
+          {
+            status = ATT_ERR_INVALID_VALUE_SIZE;
+          }
+        }
+        else
+        {
+          status = ATT_ERR_ATTR_NOT_LONG;
+        }
+
+        //Write the value
+        if ( status == SUCCESS )
+        {
+          uint8 *pCurValue = (uint8 *)pAttr->pValue;
+          VOID memcpy(pCurValue, &pValue[0], 8);
+          notifyApp = SIMPLEPROFILE_MASTER_TIME;
+        }
+      break;
 
       case GATT_CLIENT_CHAR_CFG_UUID:
         status = GATTServApp_ProcessCCCWriteReq( connHandle, pAttr, pValue, len,

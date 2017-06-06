@@ -1696,6 +1696,11 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
     Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Char 3: %d", (uint16_t)newValue);
     break;
 
+  case SIMPLEPROFILE_MASTER_TIME:
+    // Get new value
+    SimpleProfile_GetParameter(SIMPLEPROFILE_MASTER_TIME, &newValue);
+    Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Master Time: %u", (uint64_t)newValue);
+    break;
   default:
     // Should not reach here!
     break;
