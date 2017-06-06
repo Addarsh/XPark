@@ -187,6 +187,7 @@ Release Date: 2017-05-02 17:08:44
 #define TSYNC_START_CONNECT_EVT              Event_Id_09
 #define DIR_ADV_TIMEOUT_EVT                  Event_Id_10
 #define SCAN_REQUEST_TIMEOUT_EVT             Event_Id_11
+#define MASTER_TIME_RECEIVED                 Event_Id_12
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -201,7 +202,8 @@ Release Date: 2017-05-02 17:08:44
                                              SBC_DISCOVERED_EVT      | \
                                              TSYNC_START_CONNECT_EVT       | \
                                              DIR_ADV_TIMEOUT_EVT     | \
-                                             SCAN_REQUEST_TIMEOUT_EVT)
+                                             SCAN_REQUEST_TIMEOUT_EVT| \
+                                             MASTER_TIME_RECEIVED)
 
 // Discovery states
 typedef enum {
@@ -345,10 +347,10 @@ static int8_t scanIdx = -1;
 static uint64_t global_clock;
 
 //Static time variables associated with Time sync
-static uint64_t Tsync_T1 = 0;
-static uint64_t Tsync_T1_recv = 0;
-static uint64_t Tsync_T2 = 0;
-static uint64_t Tsync_T2_recv = 0;
+static uint64_t T1;
+static uint64_t T1_prime;
+static uint64_t T2;
+static uint64_t T2_prime;
 
 static enum tsync_state_t tsync_state = TSYNC_STATE_NONE;
 static enum tsync_role_t tsync_role = TSYNC_ROLE_NONE;
@@ -359,6 +361,9 @@ static enum tsync_role_t tsync_role = TSYNC_ROLE_NONE;
 #else
   static enum dev_state_t dev_state = UNSYNCED_PASSIVE_ADV;
 #endif
+
+//Used for receiving master time during time sync process
+static uint64_t peer_master_time;
 
 //Information about slave trying to sync with host
 static mrDevRec_t *tsync_slave = NULL;
@@ -542,6 +547,8 @@ static bool mr_stopScanning(void);
 static int addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport);
 static void resetScanReqReceivedList(void);
 static uint8_t *pick_dir_adv_peer(void);
+static uint64_t get_curr_time(void);
+static bool mr_writeToServer(uint8_t index, uint64_t time, uint8_t cfg_value);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -649,10 +656,8 @@ static void multi_role_init(void)
   }
 
   // Sertup the global clock that runs periodically every 1 millisecond starting now
-#ifdef MASTER_NODE
    Util_constructClock(&periodicClock, SimpleBLECentral_startPeriodicHandler,
                        PERIODIC_GLOBAL_CLOCK_DELAY, PERIODIC_GLOBAL_CLOCK_DELAY, false, 0);
-#endif
 
    // Sertup the discovered clock that runs for a while after a discovery event
    Util_constructClock(&discoveredClock, SimpleBLECentral_startDiscoveredHandler,
@@ -966,6 +971,16 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
             //Timed out during direct advertisement
             dev_state = UNSYNCED_PASSIVE_ADV;
             Display_print0(dispHandle, 21, 0, "Direct advertising timed out!");
+          }else if(events & MASTER_TIME_RECEIVED){
+            //T1 from master received, note down current time
+            T1 = peer_master_time;
+
+            Display_print1(dispHandle, 22, 0, "Master time received: %u", T1);
+
+            T2 = get_curr_time();
+            //Notify this time to the master
+            SimpleProfile_SetParameter(SIMPLEPROFILE_SLAVE_TIME, 8, &T2);
+            Display_print0(dispHandle, 25, 0, "Notification sent out to master!");
           }
         break;
 
@@ -1003,11 +1018,22 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
             break;
 
             case TSYNC_CONNECTED:
+              //Enable notifications first
+              if(!mr_writeToServer(0, T1, TRUE))
+                Display_print0(dispHandle, 16, 0, "Error! couldn't send out notifications");
+
               //Send current time => This will be a write command
-              get_curr_time();
+              T1 = get_curr_time();
+
+              //Write to server
+              Display_print1(dispHandle, 22,0, "My time: %u", T1);
+              if(mr_writeToServer(0, T1, FALSE))
+                tsync_state = SYNC_REQ_SENT;
             break;
 
             case SYNC_REQ_SENT:
+              //Waiting for notification from server
+
             break;
         }
         break;
@@ -1418,15 +1444,14 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       // Set device info characteristic
       DevInfo_SetParameter(DEVINFO_SYSTEM_ID, DEVINFO_SYSTEM_ID_LEN, pEvent->initDone.devAddr);
 
-    #ifdef MASTER_NODE
-      //Start periodic clock here
-      Util_startClock(&periodicClock);
-    #else
       //Configure the Scan Reuest report HCI command
       HCI_EXT_ScanReqRptCmd(HCI_EXT_ENABLE_SCAN_REQUEST_REPORT);
 
+      //Start periodic clock here
+      Util_startClock(&periodicClock);
+
+      //Post advertising event
       Event_post(syncEvent, MR_START_EVT);
-    #endif
     }
     break;
 
@@ -1581,7 +1606,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       //Turn off Green LED
       PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
 
-      Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Reason code for disconnect: %d", pEvent->gap.hdr.status);
+      Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Reason code for disconnect: %d", pEvent->linkTerminate.reason);
 
       // read current num active so that this doesn't change before this event is processed
       uint8_t currentNumActive = linkDB_NumActive();
@@ -1698,8 +1723,16 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
 
   case SIMPLEPROFILE_MASTER_TIME:
     // Get new value
-    SimpleProfile_GetParameter(SIMPLEPROFILE_MASTER_TIME, &newValue);
+    SimpleProfile_GetParameter(SIMPLEPROFILE_MASTER_TIME, &peer_master_time);
+    T1_prime = get_curr_time();
     Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Master Time: %u", (uint64_t)newValue);
+    Event_post(syncEvent, MASTER_TIME_RECEIVED);
+    break;
+  case SIMPLEPROFILE_SLAVE_TIME:
+    // Get new value
+    Display_print0(dispHandle, 24, 0, "Client config callback receievd!");
+    uint64_t val = 10;
+    SimpleProfile_SetParameter(SIMPLEPROFILE_SLAVE_TIME, 8,&val);
     break;
   default:
     // Should not reach here!
@@ -2469,7 +2502,7 @@ bool mr_doAdvertise(uint8_t index){
 //Handler for the periodic timeout
 static void SimpleBLECentral_startPeriodicHandler(UArg a0)
 {
-  if(global_clock % 5000 == 0) //if it's 5 sec
+  if(dev_state == SYNCED_SCANNING && global_clock % 5000 == 0) //if it's 5 sec
     Event_post(syncEvent, MR_START_EVT);
   global_clock++;
 }
@@ -2555,9 +2588,6 @@ static int addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport
   scanReqList[numScanRequests].bleChan = scanRequestReport->bleChan;
   scanReqList[numScanRequests].rssi = scanRequestReport->rssi;
   scanReqList[numScanRequests].addrType = scanRequestReport->peerAddrType;
-
-  Display_print5(dispHandle, 23,0, "furstt Peer addr: 0x%x,0x%x,0x%x,0x%x,0x%x\n",
-                               peerAddr[0],peerAddr[1],peerAddr[2],peerAddr[3],peerAddr[4]);
   numScanRequests++;
 
   Display_print1(dispHandle, 21, 0, "Num scan requests: %d", numScanRequests);
@@ -2594,5 +2624,59 @@ static uint64_t get_curr_time(void)
   curr_time = global_clock;
   Swi_restore(key);
   return curr_time;
+}
+
+/* Write time value to server, called by client  */
+static bool mr_writeToServer(uint8_t index, uint64_t time, uint8_t cfg_value)
+{
+  bStatus_t status = FAILURE;
+  // If characteristic has been discovered
+  if (discInfo[index].charHdl != 0)
+  {
+    // Do a write
+    attWriteReq_t req;
+    uint16_t handle_offset;
+    uint8_t att_len;
+
+    if(cfg_value){
+      // Allocate GATT write request
+      req.pValue = GATT_bm_alloc(connHandleMap[index].connHandle, ATT_WRITE_REQ, 1, NULL);
+      handle_offset = 21;
+      att_len = 1;
+    }else{
+      req.pValue = GATT_bm_alloc(connHandleMap[index].connHandle, ATT_WRITE_REQ, 8, NULL);
+      handle_offset = 18;
+      att_len = 8;
+    }
+    // If successfully allocated
+    if (req.pValue != NULL)
+    {
+      // Fill up request
+      req.handle = discInfo[connIndex].svcStartHdl + handle_offset;
+      req.len = att_len;
+
+      if(cfg_value)
+        req.pValue[0] = cfg_value;
+      else
+        VOID memcpy(req.pValue, &time, 8);
+
+      req.sig = 0;
+      req.cmd = 0;
+
+      // Send GATT write to controller
+      status = GATT_WriteCharValue(connHandleMap[index].connHandle, &req, selfEntity);
+
+      // If not sucessfully sent
+      if ( status != SUCCESS )
+      {
+        // Free write request as the controller will not
+        GATT_bm_free((gattMsg_t *)&req, ATT_WRITE_REQ);
+
+        return FALSE;
+      }
+    }
+  }
+
+  return TRUE;
 }
 /**********************************************************************/
