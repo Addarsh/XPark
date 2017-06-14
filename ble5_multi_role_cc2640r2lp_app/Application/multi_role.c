@@ -54,6 +54,7 @@ Release Date: 2017-05-02 17:08:44
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/knl/Event.h>
 #include <ti/sysbios/knl/Queue.h>
+#include <ti/sysbios/knl/Swi.h>
 #ifdef USE_CORE_SDK
   #include <ti/display/Display.h>
 #else /* !USE_CORE_SDK */
@@ -166,6 +167,7 @@ Release Date: 2017-05-02 17:08:44
 #define MR_PERIODIC_EVT                      Event_Id_06
 #define NOTIFY_ENABLE                        Event_Id_07
 #define NOTIFY_CLIENT                        Event_Id_08
+#define WRITE_TO_SERVER                       Event_Id_09
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -177,7 +179,8 @@ Release Date: 2017-05-02 17:08:44
                                              MR_PERIODIC_EVT         | \
                                              MR_PASSCODE_NEEDED_EVT  | \
                                              NOTIFY_ENABLE           | \
-                                             NOTIFY_CLIENT)
+                                             NOTIFY_CLIENT           | \
+                                             WRITE_TO_SERVER)
 
 // Discovery states
 typedef enum {
@@ -200,7 +203,7 @@ typedef enum {
 #define B_STR_ADDR_LEN       ((B_ADDR_LEN*2) + 3)
 
 // How often to perform periodic event (in msec)
-#define MR_PERIODIC_EVT_PERIOD               5000
+#define GLOBAL_TIME_CLOCK_PERIOD               1  //1ms clock time
 
 #define MASTER_NODE
 
@@ -229,7 +232,7 @@ typedef struct
   discState_t discState;   // discovery state
   uint16_t svcStartHdl;    // service start handle
   uint16_t svcEndHdl;      // service end handle
-  uint16_t charHdl;        // characteristic handle
+  uint16_t charHdl[5];     //5 handles for 5 characteristics
 } discInfo_t;
 
 // device discovery information with room for string address
@@ -295,6 +298,10 @@ static uint8_t scanRspData[] =
   GAP_ADTYPE_POWER_LEVEL,
   0       // 0dBm
 };
+
+//Global clock for time syncronization
+static uint64_t my_global_time;
+static uint64_t peer_global_time;
 
 // GAP - Advertisement data (max size = 31 bytes, though this is
 // best kept short to conserve power while advertisting)
@@ -393,9 +400,10 @@ static void multi_role_passcodeCB(uint8_t *deviceAddr, uint16_t connHandle,
                                   uint8_t uiInputs, uint8_t uiOutputs, uint32_t numComparison);
 static void multi_role_pairStateCB(uint16_t connHandle, uint8_t state,
                                    uint8_t status);
-static void multi_role_performPeriodicTask(void);
-static void multi_role_clockHandler(UArg arg);
-bool enable_notifs(uint8_t index);
+static void global_time_clockHandler(UArg arg);
+static bool enable_notifs(uint8_t index);
+static uint64_t get_my_global_time(void);
+static bool write_to_server(uint8_t index, uint64_t time);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -477,8 +485,8 @@ static void multi_role_init(void)
   appMsgQueue = Util_constructQueue(&appMsg);
 
   // Create one-shot clocks for internal periodic events.
-  Util_constructClock(&periodicClock, multi_role_clockHandler,
-                      MR_PERIODIC_EVT_PERIOD, 0, false, MR_PERIODIC_EVT);
+  Util_constructClock(&periodicClock, global_time_clockHandler,
+                      GLOBAL_TIME_CLOCK_PERIOD, GLOBAL_TIME_CLOCK_PERIOD, false, 0);
 
   // Init keys and LCD
   Board_initKeys(multi_role_keyChangeHandler);
@@ -584,7 +592,7 @@ static void multi_role_init(void)
       // Init index to connection handle map to 0's
       for (uint8_t i = 0; i < maxNumBleConns; i++)
       {
-        discInfo[i].charHdl = 0;
+        discInfo[i].charHdl[SIMPLEPROFILE_CHAR1] = 0;
         discInfo[i].discState = BLE_DISC_STATE_IDLE;
         discInfo[i].svcEndHdl = 0;
         discInfo[i].svcStartHdl = 0;
@@ -761,33 +769,31 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
         }
       }
 
-      if (events & MR_PERIODIC_EVT)
-      {
-        Util_startClock(&periodicClock);
-
-        // Perform periodic application task
-        multi_role_performPeriodicTask();
-      }
-
       if (events & NOTIFY_ENABLE)
       {
         //Write to enable configuration callback
-        if(enable_notifs(0) == FAILURE)
-          Event_post(syncEvent, NOTIFY_ENABLE);
-        else{
-          Display_print0(dispHandle,15,0,"Success! Notifications enabled!");
+        if(enable_notifs(0) == FAILURE){
+          Display_print0(dispHandle,15,0,"Chill bro!");
+          //Event_post(syncEvent, NOTIFY_ENABLE);
         }
       }
 
       if(events & NOTIFY_CLIENT)
       {
          //Notify the client, call SetParameter
-         uint8_t val = 45;
-         if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, 1,&val) == FAILURE)
-           Event_post(syncEvent, NOTIFY_CLIENT);
-         else{
-           Display_print0(dispHandle,15,0,"Success! Notification sent!");
+         uint64_t cur_time = get_my_global_time();
+         if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,SIMPLEPROFILE_CHAR4_LEN,&cur_time) == FAILURE){
+           Display_print0(dispHandle, 15, 0, "Error! Notification send failed!");
          }
+      }
+
+      if(events & WRITE_TO_SERVER)
+      {
+        //Notify the client, call SetParameter
+        uint64_t cur_time = get_my_global_time();
+        if(write_to_server(0,cur_time) == FAILURE){
+          Display_print0(dispHandle,15,0,"Error! Write to server failed!");
+        }
       }
     }
   }
@@ -932,10 +938,12 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
   {
     //Notification received from the GATT server
     attHandleValueNoti_t *msg_ptr = &(pMsg->msg.handleValueNoti);
-    int handle = msg_ptr->handle;
     int len = msg_ptr->len;
-    uint8_t *pval = msg_ptr->pValue;
-    Display_print3(dispHandle, 13, 0, "Notification received! handle: %d, len: %d, val: %d", handle, len, pval[0]);
+    memcpy(&peer_global_time, msg_ptr->pValue,len);
+    Display_print1(dispHandle, 10, 0, "peer time: %u", peer_global_time);
+
+    //Notify the peer of my time
+    //Event_post(syncEvent, WRITE_TO_SERVER);
   }
 
   // Messages from GATT server
@@ -1191,6 +1199,9 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
 
       // Set device info characteristic
       DevInfo_SetParameter(DEVINFO_SYSTEM_ID, DEVINFO_SYSTEM_ID_LEN, pEvent->initDone.devAddr);
+
+      //Start global clock to count time
+      Util_startClock(&periodicClock);
     }
     break;
 
@@ -1304,11 +1315,6 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
 #ifdef MASTER_NODE
         multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
 #endif
-        // Start periodic clock if this is the first connection
-        if (linkDB_NumActive() == 1)
-        {
-          Util_startClock(&periodicClock);
-        }
       }
       // If the connection was not successfully established
       else
@@ -1339,7 +1345,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
 
         // Reset discovery info
         discInfo[connIndex].discState = BLE_DISC_STATE_IDLE;
-        discInfo[connIndex].charHdl = 0;
+        discInfo[connIndex].charHdl[SIMPLEPROFILE_CHAR1] = 0;
 
         // Disable connection item from connectable menus
         tbm_setItemStatus(&mrMenuGattRw, TBM_ITEM_NONE, (1 << connIndex));
@@ -1352,9 +1358,6 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
           // Disable connectable menus
           tbm_setItemStatus(&mrMenuMain, TBM_ITEM_NONE,
                             TBM_ITEM_2 | TBM_ITEM_3 | TBM_ITEM_4);
-
-          // Stop periodic clock
-          Util_stopClock(&periodicClock);
         }
 
         // Clear screen
@@ -1420,15 +1423,16 @@ static void multi_role_charValueChangeCB(uint8_t paramID)
 static void multi_role_processCharValueChangeEvt(uint8_t paramID)
 {
   uint8_t newValue;
+  uint64_t new_time;
 
   // Print new value depending on which characteristic was updated
   switch(paramID)
   {
   case SIMPLEPROFILE_CHAR1:
     // Get new value
-    SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &newValue);
+    SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &new_time);
 
-    Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Char 1: %d", (uint16_t)newValue);
+    Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Char 1: %u", (uint32_t)new_time);
     break;
 
   case SIMPLEPROFILE_CHAR3:
@@ -1631,17 +1635,18 @@ static void multi_role_processGATTDiscEvent(gattMsgEvent_t *pMsg)
         {
           attReadByTypeReq_t req;
 
-          // Discover characteristic
-          discInfo[connIndex].discState = BLE_DISC_STATE_CHAR;
-          req.startHandle = discInfo[connIndex].svcStartHdl;
-          req.endHandle = discInfo[connIndex].svcEndHdl;
-          req.type.len = ATT_BT_UUID_SIZE;
-          req.type.uuid[0] = LO_UINT16(SIMPLEPROFILE_CHAR4_UUID);
-          req.type.uuid[1] = HI_UINT16(SIMPLEPROFILE_CHAR4_UUID);
+               // Discover characteristic
+                    discInfo[connIndex].discState = BLE_DISC_STATE_CHAR;
+                    req.startHandle = discInfo[connIndex].svcStartHdl;
+                    req.endHandle = discInfo[connIndex].svcEndHdl;
+                    req.type.len = ATT_BT_UUID_SIZE;
+                    req.type.uuid[0] = LO_UINT16(SIMPLEPROFILE_CHAR1_UUID);
+                    req.type.uuid[1] = HI_UINT16(SIMPLEPROFILE_CHAR1_UUID);
 
-          // Send characteristic discovery request
           //VOID GATT_ReadUsingCharUUID(pMsg->connHandle, &req, selfEntity);
-          VOID GATT_DiscCharsByUUID(pMsg->connHandle, &req, selfEntity);
+
+          GATT_DiscAllChars(pMsg->connHandle,discInfo[connIndex].svcStartHdl,
+                                discInfo[connIndex].svcEndHdl,selfEntity);
         }
       }
     }
@@ -1650,15 +1655,16 @@ static void multi_role_processGATTDiscEvent(gattMsgEvent_t *pMsg)
     {
       // Characteristic found
       if ((pMsg->method == ATT_READ_BY_TYPE_RSP) &&
-          (pMsg->msg.readByTypeRsp.numPairs > 0))
+         (pMsg->msg.readByTypeRsp.numPairs > 0))
       {
+        int att_len = pMsg->msg.readByTypeRsp.len;
         // Store handle
-        discInfo[connIndex].charHdl = BUILD_UINT16(pMsg->msg.readByTypeRsp.pDataList[0],
-                                                   pMsg->msg.readByTypeRsp.pDataList[1]);
+        for(int i = 0; i < pMsg->msg.readByTypeRsp.numPairs; i++){
+          discInfo[connIndex].charHdl[i] = BUILD_UINT16(pMsg->msg.readByTypeRsp.pDataList[att_len*i],
+                                                       pMsg->msg.readByTypeRsp.pDataList[att_len*i + 1]);
+        }
 
-        Display_print2(dispHandle, MR_ROW_STATUS1, 0, "Simple Svc Found, hdl : %d, numpairs: %d", discInfo[connIndex].charHdl,
-                       pMsg->msg.readByTypeRsp.numPairs);
-
+        Display_print0(dispHandle,6,0,"recieved all characteristics!");
         Event_post(syncEvent, NOTIFY_ENABLE);
       }
     }
@@ -1821,44 +1827,18 @@ static void multi_role_processPasscode(gapPasskeyNeededEvent_t *pData)
 }
 
 /*********************************************************************
- * @fn      multi_role_clockHandler
+ * @fn      global_time_clockHandler
  *
  * @brief   Handler function for clock timeouts.
  *
  * @param   arg - event type
  */
-static void multi_role_clockHandler(UArg arg)
+static void global_time_clockHandler(UArg arg)
 {
-  // Wake up the application.
-  Event_post(syncEvent, arg);
+  //Increment global time
+  my_global_time++;
 }
 
-
-/*********************************************************************
- * @brief   Perform a periodic application task to demonstrate notification
- *          capabilities of simpleGATTProfile. This function gets called
- *          every five seconds (MR_PERIODIC_EVT_PERIOD). In this example,
- *          the value of the third characteristic in the SimpleGATTProfile
- *          service is retrieved from the profile, and then copied into the
- *          value of the the fourth characteristic.
- *
- */
-static void multi_role_performPeriodicTask(void)
-{
-  uint8_t valueToCopy;
-
-  // Call to retrieve the value of the third characteristic in the profile
-  if (SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &valueToCopy) == SUCCESS)
-  {
-    // Call to set that value of the fourth characteristic in the profile.
-    // Note that if notifications of the fourth characteristic have been
-    // enabled by a GATT client device, then a notification will be sent
-    // every time this function is called. Also note that this will
-    // send a notification to each connected device.
-    //SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
-   //                            &valueToCopy);
-  }
-}
 
 /*********************************************************************
 * @fn      multi_role_addMappingEntry
@@ -2007,7 +1987,7 @@ bool mr_doGattRw(uint8_t index)
   bStatus_t status = FAILURE;
   // If characteristic has been discovered
   Display_print1(dispHandle,20,0,"conn map index: %d", index);
-  if (discInfo[index].charHdl != 0)
+  if (discInfo[index].charHdl[SIMPLEPROFILE_CHAR1] != 0)
   {
     // Do a read / write as long as no other read or write is in progress
     if (doWrite)
@@ -2021,7 +2001,7 @@ bool mr_doGattRw(uint8_t index)
       if (req.pValue != NULL)
       {
         // Fill up request
-        req.handle = discInfo[index].charHdl;
+        req.handle = discInfo[index].charHdl[SIMPLEPROFILE_CHAR1];
         req.len = 1;
         req.pValue[0] = charVal;
         req.sig = 0;
@@ -2045,7 +2025,7 @@ bool mr_doGattRw(uint8_t index)
       attReadReq_t req;
 
       // Fill up read request
-      req.handle = discInfo[index].charHdl;
+      req.handle = discInfo[index].charHdl[SIMPLEPROFILE_CHAR1];
 
       // Send read request. no need to free if unsuccessful since the request
       // is only placed in CSTACK; not allocated
@@ -2142,11 +2122,11 @@ bool mr_doAdvertise(uint8_t index)
 }
 
 //Enable notifications for server
-bool enable_notifs(uint8_t index)
+static bool enable_notifs(uint8_t index)
 {
   bStatus_t status = FAILURE;
   // If characteristic has been discovered
-  if (discInfo[index].charHdl != 0)
+  if (discInfo[index].charHdl[SIMPLEPROFILE_CHAR1] != 0)
   {
       // Do a write
       attWriteReq_t req;
@@ -2157,7 +2137,7 @@ bool enable_notifs(uint8_t index)
       if (req.pValue != NULL)
       {
         // Fill up request
-        req.handle = discInfo[index].charHdl + 2;  //Notif handle is 1 ahead of char val handle
+        req.handle = discInfo[index].charHdl[SIMPLEPROFILE_CHAR4] + 2;  //Notif handle is 1 ahead of char val handle
         req.len = 2;
         req.pValue[0] = 0x01;
         req.pValue[1] = 0x00;
@@ -2179,5 +2159,52 @@ bool enable_notifs(uint8_t index)
   return status;
 }
 
+/* Returns the current global time in milliseconds */
+static uint64_t get_my_global_time(void)
+{
+  uint64_t curr_time;
+
+  uint_t key = Swi_disable();
+  curr_time = my_global_time;
+  Swi_restore(key);
+
+  return curr_time;
+}
+
+static bool write_to_server(uint8_t index, uint64_t time)
+{
+  bStatus_t status = FAILURE;
+
+  if (discInfo[index].charHdl[SIMPLEPROFILE_CHAR1] != 0)
+  {
+    // Do a write
+    attWriteReq_t req;
+
+    // Allocate GATT write request
+    req.pValue = GATT_bm_alloc(connHandleMap[index].connHandle, ATT_WRITE_REQ, SIMPLEPROFILE_CHAR1_LEN, NULL);
+    // If successfully allocated
+    if (req.pValue != NULL)
+    {
+      // Fill up request
+      req.handle = discInfo[index].charHdl[SIMPLEPROFILE_CHAR1];
+      req.len = SIMPLEPROFILE_CHAR1_LEN;
+      VOID memcpy(req.pValue, &time, SIMPLEPROFILE_CHAR1_LEN);
+      req.sig = 0;
+      req.cmd = 0;
+
+      // Send GATT write to controller
+      status = GATT_WriteCharValue(connHandleMap[index].connHandle, &req, selfEntity);
+
+      // If not sucessfully sent
+      if ( status != SUCCESS )
+      {
+        // Free write request as the controller will not
+        GATT_bm_free((gattMsg_t *)&req, ATT_WRITE_REQ);
+      }
+    }
+  }
+
+  return TRUE;
+}
 /*********************************************************************
 *********************************************************************/

@@ -165,7 +165,8 @@ static uint8 simpleProfileChar3UserDesp[17] = "Characteristic 3";
 static uint8 simpleProfileChar4Props = GATT_PROP_NOTIFY;
 
 // Characteristic 4 Value
-static uint8 simpleProfileChar4 = 0;
+//static uint8 simpleProfileChar4 = 0;
+static uint8_t simpleProfileChar4[SIMPLEPROFILE_CHAR4_LEN] = {0,0,0,0,0,0,0,0};
 
 // Simple Profile Characteristic 4 Configuration Each client has its own
 // instantiation of the Client Characteristic Configuration. Reads of the
@@ -213,7 +214,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
         { ATT_BT_UUID_SIZE, simpleProfilechar1UUID },
         GATT_PERMIT_READ | GATT_PERMIT_WRITE, 
         0, 
-        &simpleProfileChar1 
+        &simpleProfileChar1
       },
       // Characteristic 1 User Description
       { 
@@ -284,7 +285,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
         { ATT_BT_UUID_SIZE, simpleProfilechar4UUID },
         0, 
         0, 
-        &simpleProfileChar4 
+        simpleProfileChar4
       },
 
       // Characteristic 4 configuration
@@ -450,9 +451,9 @@ bStatus_t SimpleProfile_SetParameter( uint8 param, uint8 len, void *value )
   switch ( param )
   {
     case SIMPLEPROFILE_CHAR1:
-      if ( len == sizeof ( uint8 ) ) 
+      if ( len == sizeof ( uint8 ) )
       {
-        simpleProfileChar1 = *((uint8*)value);
+          simpleProfileChar1 = *((uint8*)value);
       }
       else
       {
@@ -483,12 +484,12 @@ bStatus_t SimpleProfile_SetParameter( uint8 param, uint8 len, void *value )
       break;
 
     case SIMPLEPROFILE_CHAR4:
-      if ( len == sizeof ( uint8 ) ) 
+      if ( len == SIMPLEPROFILE_CHAR4_LEN )
       {
-        simpleProfileChar4 = *((uint8*)value);
+        VOID memcpy( simpleProfileChar4, value, SIMPLEPROFILE_CHAR4_LEN );
         
         // See if Notification has been enabled
-        ret = GATTServApp_ProcessCharCfg( simpleProfileChar4Config, &simpleProfileChar4, FALSE,
+        ret = GATTServApp_ProcessCharCfg( simpleProfileChar4Config, simpleProfileChar4, FALSE,
                                     simpleProfileAttrTbl, GATT_NUM_ATTRS( simpleProfileAttrTbl ),
                                     INVALID_TASK_ID, simpleProfile_ReadAttrCB );
       }
@@ -536,7 +537,7 @@ bStatus_t SimpleProfile_GetParameter( uint8 param, void *value )
   switch ( param )
   {
     case SIMPLEPROFILE_CHAR1:
-      *((uint8*)value) = simpleProfileChar1;
+        *((uint8*)value) = simpleProfileChar1;
       break;
 
     case SIMPLEPROFILE_CHAR2:
@@ -548,7 +549,7 @@ bStatus_t SimpleProfile_GetParameter( uint8 param, void *value )
       break;  
 
     case SIMPLEPROFILE_CHAR4:
-      *((uint8*)value) = simpleProfileChar4;
+      VOID memcpy( value, simpleProfileChar4, SIMPLEPROFILE_CHAR4_LEN );
       break;
 
     case SIMPLEPROFILE_CHAR5:
@@ -608,9 +609,13 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
       //   can be sent as a notification, it is included here
       case SIMPLEPROFILE_CHAR1_UUID:
       case SIMPLEPROFILE_CHAR2_UUID:
-      case SIMPLEPROFILE_CHAR4_UUID:
         *pLen = 1;
         pValue[0] = *pAttr->pValue;
+        break;
+
+      case SIMPLEPROFILE_CHAR4_UUID:
+        *pLen = SIMPLEPROFILE_CHAR4_LEN;
+        VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_CHAR4_LEN );
         break;
 
       case SIMPLEPROFILE_CHAR5_UUID:
@@ -664,6 +669,26 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
     switch ( uuid )
     {
       case SIMPLEPROFILE_CHAR1_UUID:
+        if ( offset == 0 )
+        {
+          if ( len != 1 )
+          {
+            status = ATT_ERR_INVALID_VALUE_SIZE;
+          }
+        }
+        else
+        {
+          status = ATT_ERR_ATTR_NOT_LONG;
+        }
+        //Write the value
+        if ( status == SUCCESS )
+        {
+          uint8 *pCurValue = (uint8 *)pAttr->pValue;
+          *pCurValue = pValue[0];
+          notifyApp = SIMPLEPROFILE_CHAR1;
+        }
+        break;
+
       case SIMPLEPROFILE_CHAR3_UUID:
 
         //Validate the value
@@ -686,14 +711,7 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
           uint8 *pCurValue = (uint8 *)pAttr->pValue;        
           *pCurValue = pValue[0];
 
-          if( pAttr->pValue == &simpleProfileChar1 )
-          {
-            notifyApp = SIMPLEPROFILE_CHAR1;        
-          }
-          else
-          {
-            notifyApp = SIMPLEPROFILE_CHAR3;           
-          }
+          notifyApp = SIMPLEPROFILE_CHAR3;
         }
              
         break;
