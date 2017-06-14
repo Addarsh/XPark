@@ -64,7 +64,7 @@
  * CONSTANTS
  */
 
-#define SERVAPP_NUM_ATTR_SUPPORTED        24
+#define SERVAPP_NUM_ATTR_SUPPORTED        17
 
 /*********************************************************************
  * TYPEDEFS
@@ -107,18 +107,6 @@ CONST uint8 simpleProfilechar4UUID[ATT_BT_UUID_SIZE] =
 CONST uint8 simpleProfilechar5UUID[ATT_BT_UUID_SIZE] =
 { 
   LO_UINT16(SIMPLEPROFILE_CHAR5_UUID), HI_UINT16(SIMPLEPROFILE_CHAR5_UUID)
-};
-
-// Characteristic 6 -> Master time: UUID: 0xFFF6
-CONST uint8 simpleProfileMasterTimeUUID[ATT_BT_UUID_SIZE] =
-{
-  LO_UINT16(SIMPLEPROFILE_MASTER_TIME_UUID), HI_UINT16(SIMPLEPROFILE_MASTER_TIME_UUID)
-};
-
-// Characteristic 6 -> Slave time: UUID: 0xFFF7
-CONST uint8 simpleProfileSlaveTimeUUID[ATT_BT_UUID_SIZE] =
-{
-  LO_UINT16(SIMPLEPROFILE_SLAVE_TIME_UUID), HI_UINT16(SIMPLEPROFILE_SLAVE_TIME_UUID)
 };
 
 /*********************************************************************
@@ -164,7 +152,7 @@ static uint8 simpleProfileChar2UserDesp[17] = "Characteristic 2";
 
 
 // Simple Profile Characteristic 3 Properties
-static uint8 simpleProfileChar3Props = GATT_PROP_WRITE;
+static uint8 simpleProfileChar3Props = GATT_PROP_READ  | GATT_PROP_WRITE;
 
 // Characteristic 3 Value
 static uint8 simpleProfileChar3 = 0;
@@ -198,26 +186,6 @@ static uint8 simpleProfileChar5[SIMPLEPROFILE_CHAR5_LEN] = { 0, 0, 0, 0, 0 };
 // Simple Profile Characteristic 5 User Description
 static uint8 simpleProfileChar5UserDesp[17] = "Characteristic 5";
 
-
-// Simple Profile Characteristic 6 -> Master Time Properties
-static uint8 simpleProfileMasterTimeProps = GATT_PROP_READ  | GATT_PROP_WRITE;
-
-// Characteristic 6 -> Master Time Value
-static uint8 simpleProfileMasterTime[SIMPLEPROFILE_MASTER_TIME_LEN] = { 0, 0, 0, 0, 0, 0, 0 ,0 };
-
-// Simple Profile Characteristic 6 User Description
-static uint8 simpleProfileMasterTimeUserDesp[17] = "Master Time";
-
-
-// Simple Profile Characteristic 7 -> Slave Time Properties
-static uint8 simpleProfileSlaveTimeProps = GATT_PROP_READ |GATT_PROP_NOTIFY;
-
-// Characteristic Time Value
-static uint8 simpleProfileSlaveTime[SIMPLEPROFILE_SLAVE_TIME_LEN] = { 0, 0, 0, 0, 0, 0, 0 ,0 };
-
-// Simple Profile Characteristic 7 User Description
-static uint8 simpleProfileSlaveTimeUserDesp[17] = "Slave Time";
-
 /*********************************************************************
  * Profile Attributes - Table
  */
@@ -247,7 +215,6 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
         0, 
         &simpleProfileChar1 
       },
-
       // Characteristic 1 User Description
       { 
         { ATT_BT_UUID_SIZE, charUserDescUUID },
@@ -291,7 +258,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
       // Characteristic Value 3
       { 
         { ATT_BT_UUID_SIZE, simpleProfilechar3UUID },
-        GATT_PERMIT_WRITE, 
+        GATT_PERMIT_READ | GATT_PERMIT_WRITE,
         0, 
         &simpleProfileChar3 
       },
@@ -359,62 +326,6 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
         0, 
         simpleProfileChar5UserDesp 
       },
-
-      // Characteristic 6 -> Slave Time Declaration
-       {
-         { ATT_BT_UUID_SIZE, characterUUID },
-         GATT_PERMIT_READ,
-         0,
-         &simpleProfileMasterTimeProps
-       },
-
-         // Characteristic Value 6
-         {
-           { ATT_BT_UUID_SIZE, simpleProfileMasterTimeUUID },
-           GATT_PERMIT_READ | GATT_PERMIT_WRITE,
-           0,
-           simpleProfileMasterTime
-         },
-
-         // Characteristic 6 User Description
-         {
-           { ATT_BT_UUID_SIZE, charUserDescUUID },
-           GATT_PERMIT_READ,
-           0,
-           simpleProfileMasterTimeUserDesp
-         },
-
-         // Characteristic 7 Declaration
-         {
-           { ATT_BT_UUID_SIZE, characterUUID },
-           GATT_PERMIT_READ,
-           0,
-           &simpleProfileSlaveTimeProps
-         },
-
-           // Characteristic Value 7
-           {
-             { ATT_BT_UUID_SIZE, simpleProfileSlaveTimeUUID },
-             GATT_PERMIT_READ,
-             0,
-             simpleProfileSlaveTime
-           },
-
-           // Characteristic 7 configuration
-           {
-             { ATT_BT_UUID_SIZE, clientCharCfgUUID },
-             GATT_PERMIT_READ | GATT_PERMIT_WRITE,
-             0,
-             (uint8 *)&simpleProfileChar4Config
-           },
-
-           // Characteristic 7 User Description
-           {
-             { ATT_BT_UUID_SIZE, charUserDescUUID },
-             GATT_PERMIT_READ,
-             0,
-             simpleProfileSlaveTimeUserDesp
-           },
 };
 
 /*********************************************************************
@@ -577,7 +488,7 @@ bStatus_t SimpleProfile_SetParameter( uint8 param, uint8 len, void *value )
         simpleProfileChar4 = *((uint8*)value);
         
         // See if Notification has been enabled
-        GATTServApp_ProcessCharCfg( simpleProfileChar4Config, &simpleProfileChar4, FALSE,
+        ret = GATTServApp_ProcessCharCfg( simpleProfileChar4Config, &simpleProfileChar4, FALSE,
                                     simpleProfileAttrTbl, GATT_NUM_ATTRS( simpleProfileAttrTbl ),
                                     INVALID_TASK_ID, simpleProfile_ReadAttrCB );
       }
@@ -591,22 +502,6 @@ bStatus_t SimpleProfile_SetParameter( uint8 param, uint8 len, void *value )
       if ( len == SIMPLEPROFILE_CHAR5_LEN ) 
       {
         VOID memcpy( simpleProfileChar5, value, SIMPLEPROFILE_CHAR5_LEN );
-      }
-      else
-      {
-        ret = bleInvalidRange;
-      }
-      break;
-
-    case SIMPLEPROFILE_SLAVE_TIME:
-      if ( len == 8 )
-      {
-        VOID memcpy(simpleProfileSlaveTime, value, 8);
-
-        // See if Notification has been enabled
-        GATTServApp_ProcessCharCfg( simpleProfileChar4Config, simpleProfileSlaveTime, FALSE,
-                                    simpleProfileAttrTbl, GATT_NUM_ATTRS( simpleProfileAttrTbl ),
-                                    INVALID_TASK_ID, simpleProfile_ReadAttrCB );
       }
       else
       {
@@ -658,11 +553,7 @@ bStatus_t SimpleProfile_GetParameter( uint8 param, void *value )
 
     case SIMPLEPROFILE_CHAR5:
       VOID memcpy( value, simpleProfileChar5, SIMPLEPROFILE_CHAR5_LEN );
-      break;
-
-    case SIMPLEPROFILE_MASTER_TIME:
-      VOID memcpy( value, simpleProfileMasterTime, SIMPLEPROFILE_MASTER_TIME_LEN );
-      break;
+      break;      
       
     default:
       ret = INVALIDPARAMETER;
@@ -726,17 +617,7 @@ static bStatus_t simpleProfile_ReadAttrCB(uint16_t connHandle,
         *pLen = SIMPLEPROFILE_CHAR5_LEN;
         VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_CHAR5_LEN );
         break;
-
-      case SIMPLEPROFILE_MASTER_TIME_UUID:
-        *pLen = SIMPLEPROFILE_MASTER_TIME_LEN;
-         VOID memcpy( pValue, pAttr->pValue, SIMPLEPROFILE_MASTER_TIME_LEN );
-         break;
-
-      case SIMPLEPROFILE_SLAVE_TIME_UUID:
-        *pLen =  SIMPLEPROFILE_SLAVE_TIME_LEN;
-        VOID memcpy(pValue, pAttr->pValue, SIMPLEPROFILE_SLAVE_TIME_LEN);
-        break;
-
+        
       default:
         // Should never get here! (characteristics 3 and 4 do not have read permissions)
         *pLen = 0;
@@ -817,34 +698,11 @@ static bStatus_t simpleProfile_WriteAttrCB(uint16_t connHandle,
              
         break;
 
-      case SIMPLEPROFILE_MASTER_TIME_UUID:
-        //Validate the value
-        // Make sure it's not a blob oper
-        if ( offset == 0 )
-        {
-          if ( len != 8 )
-          {
-            status = ATT_ERR_INVALID_VALUE_SIZE;
-          }
-        }
-        else
-        {
-          status = ATT_ERR_ATTR_NOT_LONG;
-        }
-
-        //Write the value
-        if ( status == SUCCESS )
-        {
-          uint8 *pCurValue = (uint8 *)pAttr->pValue;
-          VOID memcpy(pCurValue, &pValue[0], 8);
-          notifyApp = SIMPLEPROFILE_MASTER_TIME;
-        }
-      break;
-
       case GATT_CLIENT_CHAR_CFG_UUID:
         status = GATTServApp_ProcessCCCWriteReq( connHandle, pAttr, pValue, len,
                                                  offset, GATT_CLIENT_CFG_NOTIFY );
-        notifyApp = SIMPLEPROFILE_SLAVE_TIME;
+
+        notifyApp = SIMPLEPROFILE_CHAR5;  //Pseudo handle to handle CFG related callback
         break;
         
       default:

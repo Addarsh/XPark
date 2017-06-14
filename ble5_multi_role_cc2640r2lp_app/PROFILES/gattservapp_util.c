@@ -175,6 +175,7 @@ bStatus_t GATTServApp_ProcessCharCfg( gattCharCfg_t *charCfgTbl, uint8 *pValue,
       pAttr = GATTServApp_FindAttr( attrTbl, numAttrs, pValue );
       if ( pAttr != NULL )
       {
+
         if ( pItem->value & GATT_CLIENT_CFG_NOTIFY )
         {
            status |= gattServApp_SendNotiInd( pItem->connHandle, GATT_CLIENT_CFG_NOTIFY,

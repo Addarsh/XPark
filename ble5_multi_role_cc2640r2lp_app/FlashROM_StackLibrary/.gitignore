@@ -1,7 +1,10 @@
-/TOOLS/
 /Application/
 /Drivers/
 /ICall/
 /ICallBLE/
 /PROFILES/
 /Startup/
+/TOOLS/
+/makefile
+/objects.mk
+/sources.mk

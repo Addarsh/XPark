@@ -3,6 +3,7 @@
 	<name>ble5_simple_peripheral_cc2640r2lp_app</name>
 	<comment></comment>
 	<projects>
+		<project>ble5_multi_role_cc2640r2lp_stack_library</project>
 		<project>ble5_simple_peripheral_cc2640r2lp_stack_library</project>
 	</projects>
 	<buildSpec>

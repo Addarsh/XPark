@@ -2,7 +2,6 @@
 /Host/
 /ICallBLE/
 /NPI/
-/sources.mk
 /OSAL/
 /PROFILES/
 /ROM/
@@ -10,3 +9,4 @@
 /TOOLS/
 /makefile
 /objects.mk
+/sources.mk

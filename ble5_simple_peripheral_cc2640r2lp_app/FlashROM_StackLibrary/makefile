@@ -178,10 +178,11 @@ all: $(OBJS) $(CMD_SRCS) $(GEN_CMDS)
 	@$(MAKE) --no-print-directory -Onone "ble5_simple_peripheral_cc2640r2lp_app.out"
 
 dependents:
+	-cd C:/Users/addar/workspace_v7/XPark/ble5_multi_role_cc2640r2lp_stack_library/FlashROM_Library && $(MAKE) all
 	-cd C:/Users/addar/workspace_v7/XPark/ble5_simple_peripheral_cc2640r2lp_stack_library/FlashROM_Library && $(MAKE) all
 
 # Tool invocations
-ble5_simple_peripheral_cc2640r2lp_app.out: $(OBJS) $(CMD_SRCS) $(GEN_CMDS) C:/Users/addar/workspace_v7/XPark/ble5_simple_peripheral_cc2640r2lp_stack_library/FlashROM_Library/ble5_simple_peripheral_cc2640r2lp_stack_library.lib
+ble5_simple_peripheral_cc2640r2lp_app.out: $(OBJS) $(CMD_SRCS) $(GEN_CMDS) C:/Users/addar/workspace_v7/XPark/ble5_multi_role_cc2640r2lp_stack_library/FlashROM_Library/ble5_multi_role_cc2640r2lp_stack_library.lib C:/Users/addar/workspace_v7/XPark/ble5_simple_peripheral_cc2640r2lp_stack_library/FlashROM_Library/ble5_simple_peripheral_cc2640r2lp_stack_library.lib
 	@echo 'Building target: $@'
 	@echo 'Invoking: ARM Linker'
 	"C:/ti/ccsv7/tools/compiler/ti-cgt-arm_16.9.1.LTS/bin/armcl" --cmd_file="C:/ti/simplelink_cc2640r2_sdk_1_35_00_33/source/ti/ble5stack/config/build_components.opt" --cmd_file="C:/ti/simplelink_cc2640r2_sdk_1_35_00_33/source/ti/ble5stack/config/factory_config.opt" --cmd_file="C:/Users/addar/workspace_v7/XPark/ble5_simple_peripheral_cc2640r2lp_stack_library/TOOLS/build_config.opt"  -mv7M3 --code_state=16 -me -O4 --opt_for_speed=0 --define=DEVICE_FAMILY=cc26x0r2 --define=BOARD_DISPLAY_USE_LCD=0 --define=BOARD_DISPLAY_USE_UART=1 --define=BOARD_DISPLAY_USE_UART_ANSI=1 --define=CC2640R2_LAUNCHXL --define=CC26XX --define=CC26XX_R2 --define=HEAPMGR_SIZE=0 --define=ICALL_EVENTS --define=ICALL_JT --define=ICALL_LITE --define=ICALL_MAX_NUM_ENTITIES=6 --define=ICALL_MAX_NUM_TASKS=3 --define=ICALL_STACK0_ADDR --define=POWER_SAVING --define=STACK_LIBRARY --define=TBM_ACTIVE_ITEMS_ONLY --define=USE_CORE_SDK --define=USE_ICALL --define=xdc_runtime_Assert_DISABLE_ALL --define=xdc_runtime_Log_DISABLE_ALL -g --c99 --gcc --diag_warning=225 --diag_wrap=off --display_error_number --gen_func_subsections=on --abi=eabi -z -m"ble5_simple_peripheral_cc2640r2lp_app.map" --heap_size=0 --stack_size=256 -i"C:/ti/ccsv7/tools/compiler/ti-cgt-arm_16.9.1.LTS/lib" -i"C:/ti/ccsv7/tools/compiler/ti-cgt-arm_16.9.1.LTS/include" --reread_libs --define=CC26X0ROM=2 --diag_suppress=16002-D --diag_suppress=10247-D --diag_suppress=10325-D --diag_suppress=10229-D --diag_wrap=off --display_error_number --warn_sections --xml_link_info="ble5_simple_peripheral_cc2640r2lp_app_linkInfo.xml" --rom_model -o "ble5_simple_peripheral_cc2640r2lp_app.out" $(ORDERED_OBJS)
@@ -211,6 +212,7 @@ post-build:
 
 .PHONY: all clean dependents
 .SECONDARY:
+C:/Users/addar/workspace_v7/XPark/ble5_multi_role_cc2640r2lp_stack_library/FlashROM_Library/ble5_multi_role_cc2640r2lp_stack_library.lib:
 C:/Users/addar/workspace_v7/XPark/ble5_simple_peripheral_cc2640r2lp_stack_library/FlashROM_Library/ble5_simple_peripheral_cc2640r2lp_stack_library.lib:
 
 -include ../makefile.targets
