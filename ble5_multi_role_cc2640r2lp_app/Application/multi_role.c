@@ -167,7 +167,8 @@ Release Date: 2017-05-02 17:08:44
 #define MR_PERIODIC_EVT                      Event_Id_06
 #define NOTIFY_ENABLE                        Event_Id_07
 #define NOTIFY_CLIENT                        Event_Id_08
-#define WRITE_TO_SERVER                       Event_Id_09
+#define WRITE_TO_SERVER                      Event_Id_09
+#define DELAY_RSP                            Event_Id_10
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -180,7 +181,8 @@ Release Date: 2017-05-02 17:08:44
                                              MR_PASSCODE_NEEDED_EVT  | \
                                              NOTIFY_ENABLE           | \
                                              NOTIFY_CLIENT           | \
-                                             WRITE_TO_SERVER)
+                                             WRITE_TO_SERVER         | \
+                                             DELAY_RSP)
 
 // Discovery states
 typedef enum {
@@ -205,7 +207,7 @@ typedef enum {
 // How often to perform periodic event (in msec)
 #define GLOBAL_TIME_CLOCK_PERIOD               1  //1ms clock time
 
-#define MASTER_NODE
+//#define MASTER_NODE
 
 /*********************************************************************
 * TYPEDEFS
@@ -301,7 +303,20 @@ static uint8_t scanRspData[] =
 
 //Global clock for time syncronization
 static uint64_t my_global_time;
-static uint64_t peer_global_time;
+
+//Time variables used for synchronization of slave
+static uint64_t T1;
+static uint64_t T1_prime;
+static uint64_t T2;
+static uint64_t T2_prime;
+
+enum server_state_t{
+  WAIT_FOR_SYNC,
+  WAIT_FOR_DELAY_RSP,
+  TSYNC_COMPLETE
+};
+
+static enum server_state_t tsync_server_state = WAIT_FOR_SYNC;
 
 // GAP - Advertisement data (max size = 31 bytes, though this is
 // best kept short to conserve power while advertisting)
@@ -774,15 +789,18 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
         //Write to enable configuration callback
         if(enable_notifs(0) == FAILURE){
           Display_print0(dispHandle,15,0,"Chill bro!");
-          //Event_post(syncEvent, NOTIFY_ENABLE);
+          Event_post(syncEvent, NOTIFY_ENABLE);
+        }else{
+          //Send time to T1
+          Event_post(syncEvent, WRITE_TO_SERVER);
         }
       }
 
       if(events & NOTIFY_CLIENT)
       {
          //Notify the client, call SetParameter
-         uint64_t cur_time = get_my_global_time();
-         if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,SIMPLEPROFILE_CHAR4_LEN,&cur_time) == FAILURE){
+         T2 = get_my_global_time();
+         if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,SIMPLEPROFILE_CHAR4_LEN,&T2) == FAILURE){
            Display_print0(dispHandle, 15, 0, "Error! Notification send failed!");
          }
       }
@@ -790,9 +808,23 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
       if(events & WRITE_TO_SERVER)
       {
         //Notify the client, call SetParameter
-        uint64_t cur_time = get_my_global_time();
-        if(write_to_server(0,cur_time) == FAILURE){
+        T1 = get_my_global_time();
+        if(write_to_server(0,T1) == FAILURE){
           Display_print0(dispHandle,15,0,"Error! Write to server failed!");
+          Event_post(syncEvent, WRITE_TO_SERVER);
+        }else{
+          Display_print0(dispHandle,15,0,"Success! Wrote to server!");
+        }
+      }
+
+      if(events & DELAY_RSP){
+        //This is the delay response message
+        T2_prime = get_my_global_time();
+        if(write_to_server(0,T2_prime) == FAILURE){
+          Display_print0(dispHandle,15,0,"Error! Write to server failed!");
+          Event_post(syncEvent, WRITE_TO_SERVER);
+        }else{
+          Display_print0(dispHandle,15,0,"Success! Wrote to server!");
         }
       }
     }
@@ -939,11 +971,10 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
     //Notification received from the GATT server
     attHandleValueNoti_t *msg_ptr = &(pMsg->msg.handleValueNoti);
     int len = msg_ptr->len;
-    memcpy(&peer_global_time, msg_ptr->pValue,len);
-    Display_print1(dispHandle, 10, 0, "peer time: %u", peer_global_time);
+    memcpy(&T2, msg_ptr->pValue,len);
+    Display_print2(dispHandle, 12, 0, "T2: %u, T2_prime: %u", T2, T2_prime);
 
-    //Notify the peer of my time
-    //Event_post(syncEvent, WRITE_TO_SERVER);
+    Event_post(syncEvent, DELAY_RSP);
   }
 
   // Messages from GATT server
@@ -1423,16 +1454,31 @@ static void multi_role_charValueChangeCB(uint8_t paramID)
 static void multi_role_processCharValueChangeEvt(uint8_t paramID)
 {
   uint8_t newValue;
-  uint64_t new_time;
 
   // Print new value depending on which characteristic was updated
   switch(paramID)
   {
   case SIMPLEPROFILE_CHAR1:
     // Get new value
-    SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &new_time);
+    if(tsync_server_state == WAIT_FOR_SYNC){
+      T1_prime = get_my_global_time();
+      SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &T1);
+      Display_print2(dispHandle, MR_ROW_STATUS2, 0, "t1: %u, t1_prime: %u", (uint32_t)T1, (uint32_t)T1_prime);
 
-    Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Char 1: %u", (uint32_t)new_time);
+      //Notify master of T2
+      Event_post(syncEvent, NOTIFY_CLIENT);
+
+      tsync_server_state = WAIT_FOR_DELAY_RSP;
+    }else{
+      SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &T2_prime);
+
+      Display_print1(dispHandle, MR_ROW_STATUS2+2, 0, "t1 : %u", (uint32_t)T1);
+      Display_print1(dispHandle, MR_ROW_STATUS2+3, 0, "t1_prime: %u", (uint32_t)T1_prime);
+      Display_print1(dispHandle, MR_ROW_STATUS2+4, 0, "t2: %u", (uint32_t)T2);
+      Display_print1(dispHandle, MR_ROW_STATUS2+5, 0, "t2_prime: %u", (uint32_t)T2_prime);
+
+      tsync_server_state = TSYNC_COMPLETE;
+    }
     break;
 
   case SIMPLEPROFILE_CHAR3:
@@ -1445,9 +1491,6 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
   case SIMPLEPROFILE_CHAR5:
     //Client config callback situation
     Display_print0(dispHandle, 15, 0, "Client has enabled config!");
-
-    //Notify client now
-    Event_post(syncEvent, NOTIFY_CLIENT);
     break;
 
   default:
@@ -2186,7 +2229,7 @@ static bool write_to_server(uint8_t index, uint64_t time)
     if (req.pValue != NULL)
     {
       // Fill up request
-      req.handle = discInfo[index].charHdl[SIMPLEPROFILE_CHAR1];
+      req.handle = discInfo[index].charHdl[SIMPLEPROFILE_CHAR1] + 1;
       req.len = SIMPLEPROFILE_CHAR1_LEN;
       VOID memcpy(req.pValue, &time, SIMPLEPROFILE_CHAR1_LEN);
       req.sig = 0;
@@ -2204,7 +2247,7 @@ static bool write_to_server(uint8_t index, uint64_t time)
     }
   }
 
-  return TRUE;
+  return status;
 }
 /*********************************************************************
 *********************************************************************/
