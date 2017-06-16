@@ -169,6 +169,8 @@ Release Date: 2017-05-02 17:08:44
 #define NOTIFY_CLIENT                        Event_Id_08
 #define WRITE_TO_SERVER                      Event_Id_09
 #define DELAY_RSP                            Event_Id_10
+#define LED_ON                               Event_Id_11
+#define LED_OFF                              Event_Id_12
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -182,7 +184,9 @@ Release Date: 2017-05-02 17:08:44
                                              NOTIFY_ENABLE           | \
                                              NOTIFY_CLIENT           | \
                                              WRITE_TO_SERVER         | \
-                                             DELAY_RSP)
+                                             DELAY_RSP               | \
+                                             LED_ON                  | \
+                                             LED_OFF)
 
 // Discovery states
 typedef enum {
@@ -206,6 +210,7 @@ typedef enum {
 
 // How often to perform periodic event (in msec)
 #define GLOBAL_TIME_CLOCK_PERIOD               1  //1ms clock time
+#define LED_ON_PERIOD                        2000 //2s period
 
 //#define MASTER_NODE
 
@@ -277,6 +282,7 @@ static ICall_SyncHandle syncEvent;
 
 // Clock instances for internal periodic events.
 static Clock_Struct periodicClock;
+static Clock_Struct ledClock;
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
@@ -292,8 +298,6 @@ static uint8_t scanRspData[] =
   11,   // length of this data
   GAP_ADTYPE_LOCAL_NAME_COMPLETE,
   'M', 'u', 'l', 't', 'i', ' ', 'R', 'o', 'l', 'e',
-
-
 
   // Tx power level
   0x02,   // length of this data
@@ -314,6 +318,20 @@ enum server_state_t{
   WAIT_FOR_SYNC,
   WAIT_FOR_DELAY_RSP,
   TSYNC_COMPLETE
+};
+
+//LED pin states and handles
+static PIN_Handle ledPinHandle;
+static PIN_State ledPinState;
+
+/*
+ * Initial LED pin configuration table
+ *   - LEDs Board_LED0 & Board_LED1 are off.
+ */
+PIN_Config ledPinTable[] = {
+  Board_RLED | PIN_GPIO_OUTPUT_EN | PIN_GPIO_LOW | PIN_PUSHPULL | PIN_DRVSTR_MAX,
+  Board_GLED | PIN_GPIO_OUTPUT_EN | PIN_GPIO_LOW | PIN_PUSHPULL | PIN_DRVSTR_MAX,
+  PIN_TERMINATE
 };
 
 static enum server_state_t tsync_server_state = WAIT_FOR_SYNC;
@@ -416,9 +434,11 @@ static void multi_role_passcodeCB(uint8_t *deviceAddr, uint16_t connHandle,
 static void multi_role_pairStateCB(uint16_t connHandle, uint8_t state,
                                    uint8_t status);
 static void global_time_clockHandler(UArg arg);
+static void led_clockHandler(UArg arg);
 static bool enable_notifs(uint8_t index);
 static uint64_t get_my_global_time(void);
 static bool write_to_server(uint8_t index, uint64_t time);
+static void perform_time_sync(void);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -502,11 +522,15 @@ static void multi_role_init(void)
   // Create one-shot clocks for internal periodic events.
   Util_constructClock(&periodicClock, global_time_clockHandler,
                       GLOBAL_TIME_CLOCK_PERIOD, GLOBAL_TIME_CLOCK_PERIOD, false, 0);
+  Util_constructClock(&ledClock, led_clockHandler, LED_ON_PERIOD, 0, false, 0);
 
   // Init keys and LCD
   Board_initKeys(multi_role_keyChangeHandler);
   // Open Display.
   dispHandle = Display_open(MR_DISPLAY_TYPE, NULL);
+
+  // Open LED pins
+  ledPinHandle = PIN_open(&ledPinState, ledPinTable);
 
   /**************Init Menu*****************************/
   // Disable all menus except mrMenuScan and mrMenuAdvertise
@@ -827,6 +851,16 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
           Display_print0(dispHandle,15,0,"Success! Wrote to server!");
         }
       }
+
+      if(events & LED_ON){
+        PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
+        Util_startClock(&ledClock);
+      }
+
+      if(events & LED_OFF){
+        PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
+      }
+
     }
   }
 }
@@ -972,7 +1006,7 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
     attHandleValueNoti_t *msg_ptr = &(pMsg->msg.handleValueNoti);
     int len = msg_ptr->len;
     memcpy(&T2, msg_ptr->pValue,len);
-    Display_print2(dispHandle, 12, 0, "T2: %u, T2_prime: %u", T2, T2_prime);
+    Display_print1(dispHandle, 12, 0, "T2: %u", T2);
 
     Event_post(syncEvent, DELAY_RSP);
   }
@@ -1477,7 +1511,8 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
       Display_print1(dispHandle, MR_ROW_STATUS2+4, 0, "t2: %u", (uint32_t)T2);
       Display_print1(dispHandle, MR_ROW_STATUS2+5, 0, "t2_prime: %u", (uint32_t)T2_prime);
 
-      tsync_server_state = TSYNC_COMPLETE;
+      perform_time_sync();
+      tsync_server_state = WAIT_FOR_SYNC;
     }
     break;
 
@@ -1880,8 +1915,22 @@ static void global_time_clockHandler(UArg arg)
 {
   //Increment global time
   my_global_time++;
+  if(my_global_time % 4000 == 0)
+    Event_post(syncEvent, LED_ON);
 }
 
+/*********************************************************************
+ * @fn      led_clockHandler
+ *
+ * @brief   Handler function for led on timeouts.
+ *
+ * @param   arg - event type
+ */
+static void led_clockHandler(UArg arg)
+{
+  //Increment global time
+  Event_post(syncEvent, LED_OFF);
+}
 
 /*********************************************************************
 * @fn      multi_role_addMappingEntry
@@ -2249,5 +2298,18 @@ static bool write_to_server(uint8_t index, uint64_t time)
 
   return status;
 }
+
+//This function will synchroize the server
+//global time with the client global time
+//using the precision time procotol algorithm
+static void perform_time_sync(void)
+{
+  uint64_t offset = (T1_prime - T1 -T2_prime + T2)/2;
+
+  uint_t key = Swi_disable();
+  my_global_time -= offset;
+  Swi_restore(key);
+}
+
 /*********************************************************************
 *********************************************************************/
