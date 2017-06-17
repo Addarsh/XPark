@@ -117,7 +117,7 @@ Clock_Handle Util_constructClock(Clock_Struct *pClock,
   Clock_Params clockParams;
 
   // Convert clockDuration in milliseconds to ticks.
-  uint32_t clockTicks = clockDuration * (1000 / Clock_tickPeriod);
+  uint32_t clockTicks = (clockDuration) * (1000 / Clock_tickPeriod);
 
   // Setup parameters.
   Clock_Params_init(&clockParams);

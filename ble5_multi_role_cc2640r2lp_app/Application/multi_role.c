@@ -171,6 +171,7 @@ Release Date: 2017-05-02 17:08:44
 #define DELAY_RSP                            Event_Id_10
 #define LED_ON                               Event_Id_11
 #define LED_OFF                              Event_Id_12
+#define TSYNC_COMPLETE_EVT                   Event_Id_13
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -186,7 +187,8 @@ Release Date: 2017-05-02 17:08:44
                                              WRITE_TO_SERVER         | \
                                              DELAY_RSP               | \
                                              LED_ON                  | \
-                                             LED_OFF)
+                                             LED_OFF                 | \
+                                             TSYNC_COMPLETE_EVT)
 
 // Discovery states
 typedef enum {
@@ -211,8 +213,6 @@ typedef enum {
 // How often to perform periodic event (in msec)
 #define GLOBAL_TIME_CLOCK_PERIOD               1  //1ms clock time
 #define LED_ON_PERIOD                        2000 //2s period
-
-//#define MASTER_NODE
 
 /*********************************************************************
 * TYPEDEFS
@@ -305,16 +305,26 @@ static uint8_t scanRspData[] =
   0       // 0dBm
 };
 
+enum global_state_t{
+  TSYNCED_SCANNING,
+  TSYNCED_ADVERTISING,
+  UNSYNCED_SLAVE,
+  TSYNCED_MASTER
+};
+
+static enum global_state_t global_state = UNSYNCED_SLAVE;
+//static enum global_state_t global_state = TSYNCED_MASTER;
+
 //Global clock for time syncronization
 static uint64_t my_global_time;
 
 //Time variables used for synchronization of slave
-static uint64_t T1;
-static uint64_t T1_prime;
-static uint64_t T2;
-static uint64_t T2_prime;
+static int64_t T1;
+static int64_t T1_prime;
+static int64_t T2;
+static int64_t T2_prime;
 
-enum server_state_t{
+enum tsync_slave_state_t{
   WAIT_FOR_SYNC,
   WAIT_FOR_DELAY_RSP,
   TSYNC_COMPLETE
@@ -334,7 +344,7 @@ PIN_Config ledPinTable[] = {
   PIN_TERMINATE
 };
 
-static enum server_state_t tsync_server_state = WAIT_FOR_SYNC;
+static enum tsync_slave_state_t tsync_slave_state = WAIT_FOR_SYNC;
 
 // GAP - Advertisement data (max size = 31 bytes, though this is
 // best kept short to conserve power while advertisting)
@@ -439,6 +449,7 @@ static bool enable_notifs(uint8_t index);
 static uint64_t get_my_global_time(void);
 static bool write_to_server(uint8_t index, uint64_t time);
 static void perform_time_sync(void);
+static void multi_role_processTimeSyncEvts(uint32_t events);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -790,7 +801,6 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
           ICall_freeMsg(pMsg);
         }
       }
-
       // If RTOS queue is not empty, process app message.
       if (events & MR_QUEUE_EVT)
       {
@@ -808,48 +818,20 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
         }
       }
 
-      if (events & NOTIFY_ENABLE)
-      {
-        //Write to enable configuration callback
-        if(enable_notifs(0) == FAILURE){
-          Display_print0(dispHandle,15,0,"Chill bro!");
-          Event_post(syncEvent, NOTIFY_ENABLE);
-        }else{
-          //Send time to T1
-          Event_post(syncEvent, WRITE_TO_SERVER);
-        }
-      }
+       //Manage global application states here
+      switch(global_state){
+        case TSYNCED_SCANNING:
 
-      if(events & NOTIFY_CLIENT)
-      {
-         //Notify the client, call SetParameter
-         T2 = get_my_global_time();
-         if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,SIMPLEPROFILE_CHAR4_LEN,&T2) == FAILURE){
-           Display_print0(dispHandle, 15, 0, "Error! Notification send failed!");
-         }
-      }
+        break;
 
-      if(events & WRITE_TO_SERVER)
-      {
-        //Notify the client, call SetParameter
-        T1 = get_my_global_time();
-        if(write_to_server(0,T1) == FAILURE){
-          Display_print0(dispHandle,15,0,"Error! Write to server failed!");
-          Event_post(syncEvent, WRITE_TO_SERVER);
-        }else{
-          Display_print0(dispHandle,15,0,"Success! Wrote to server!");
-        }
-      }
+        case TSYNCED_ADVERTISING:
 
-      if(events & DELAY_RSP){
-        //This is the delay response message
-        T2_prime = get_my_global_time();
-        if(write_to_server(0,T2_prime) == FAILURE){
-          Display_print0(dispHandle,15,0,"Error! Write to server failed!");
-          Event_post(syncEvent, WRITE_TO_SERVER);
-        }else{
-          Display_print0(dispHandle,15,0,"Success! Wrote to server!");
-        }
+        break;
+
+        case TSYNCED_MASTER:
+        case UNSYNCED_SLAVE:
+            multi_role_processTimeSyncEvts(events);
+        break;
       }
 
       if(events & LED_ON){
@@ -1376,10 +1358,10 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         // Return to main menu
         tbm_goTo(&mrMenuMain);
 
-        // Start service discovery
-#ifdef MASTER_NODE
-        multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
-#endif
+        // Start service discovery if master
+        if(global_state == TSYNCED_MASTER)
+          multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
+
       }
       // If the connection was not successfully established
       else
@@ -1394,7 +1376,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
     case GAP_LINK_TERMINATED_EVENT:
     {
       //reason for disconnect
-      Display_print1(dispHandle, 13, 0, "Reason for disconnect: %d", pEvent->linkTerminate.reason);
+      //Display_print1(dispHandle, 13, 0, "Reason for disconnect: %d", pEvent->linkTerminate.reason);
 
       // read current num active so that this doesn't change before this event is processed
       uint8_t currentNumActive = linkDB_NumActive();
@@ -1434,6 +1416,11 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         {
           Display_print0(dispHandle, MR_ROW_ADV, 0, "Ready to Advertise");
           Display_print0(dispHandle, MR_ROW_STATUS2, 0, "Ready to Scan");
+        }
+
+        if(global_state == TSYNCED_MASTER){
+          //Send tsync complete event
+          Event_post(syncEvent, TSYNC_COMPLETE_EVT);
         }
       }
     }
@@ -1494,7 +1481,7 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
   {
   case SIMPLEPROFILE_CHAR1:
     // Get new value
-    if(tsync_server_state == WAIT_FOR_SYNC){
+    if(tsync_slave_state == WAIT_FOR_SYNC){
       T1_prime = get_my_global_time();
       SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &T1);
       Display_print2(dispHandle, MR_ROW_STATUS2, 0, "t1: %u, t1_prime: %u", (uint32_t)T1, (uint32_t)T1_prime);
@@ -1502,7 +1489,7 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
       //Notify master of T2
       Event_post(syncEvent, NOTIFY_CLIENT);
 
-      tsync_server_state = WAIT_FOR_DELAY_RSP;
+      tsync_slave_state = WAIT_FOR_DELAY_RSP;
     }else{
       SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &T2_prime);
 
@@ -1512,7 +1499,9 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
       Display_print1(dispHandle, MR_ROW_STATUS2+5, 0, "t2_prime: %u", (uint32_t)T2_prime);
 
       perform_time_sync();
-      tsync_server_state = WAIT_FOR_SYNC;
+
+      //Disconnect from master
+      Event_post(syncEvent, TSYNC_COMPLETE_EVT);
     }
     break;
 
@@ -2304,11 +2293,70 @@ static bool write_to_server(uint8_t index, uint64_t time)
 //using the precision time procotol algorithm
 static void perform_time_sync(void)
 {
-  uint64_t offset = (T1_prime - T1 -T2_prime + T2)/2;
+  int64_t offset = -(T1_prime - T1 -T2_prime + T2)/2;
 
   uint_t key = Swi_disable();
-  my_global_time -= offset;
+  my_global_time += offset;
   Swi_restore(key);
+}
+
+//Handle all time synchronization events here
+static void multi_role_processTimeSyncEvts(uint32_t events)
+{
+  if(global_state == TSYNCED_MASTER){
+
+    if (events & NOTIFY_ENABLE){
+      //Write to enable configuration callback
+      if(enable_notifs(0) == FAILURE){
+        Display_print0(dispHandle,15,0,"Chill bro!");
+        Event_post(syncEvent, NOTIFY_ENABLE);
+      }else{
+        //Send time to T1
+        Event_post(syncEvent, WRITE_TO_SERVER);
+       }
+     }
+    else if(events & WRITE_TO_SERVER){
+       //Notify the client, call SetParameter
+       T1 = get_my_global_time();
+       if(write_to_server(0,T1) == FAILURE){
+         Display_print0(dispHandle,15,0,"Error! Write to server failed!");
+         Event_post(syncEvent, WRITE_TO_SERVER);
+       }else{
+         Display_print0(dispHandle,15,0,"Success! Wrote to server!");
+       }
+     }
+    else if(events & DELAY_RSP){
+      //This is the delay response message
+      T2_prime = get_my_global_time();
+      if(write_to_server(0,T2_prime) == FAILURE){
+        Display_print0(dispHandle,15,0,"Error! Write to server failed!");
+        Event_post(syncEvent, WRITE_TO_SERVER);
+      }else{
+        Display_print0(dispHandle,15,0,"Success! Wrote to server!");
+      }
+    }
+    else if(events & TSYNC_COMPLETE_EVT){
+      //Tsync is complete and host has been disconnected
+      //global_state = TSYNCED_SCANNING;
+    }
+  }
+  else if(global_state == UNSYNCED_SLAVE){
+
+    if(events & NOTIFY_CLIENT){
+      //Notify the client, call SetParameter
+      T2 = get_my_global_time();
+      if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,SIMPLEPROFILE_CHAR4_LEN,&T2) == FAILURE){
+        Display_print0(dispHandle, 15, 0, "Error! Notification send failed!");
+      }
+    }
+    else if (events & TSYNC_COMPLETE_EVT){
+      //Disconnect and change state
+      mr_doDisconnect(0);
+
+      tsync_slave_state = WAIT_FOR_SYNC;
+      //global_state = TSYNCED_SCANNING;
+    }
+  }
 }
 
 /*********************************************************************
