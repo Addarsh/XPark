@@ -108,6 +108,7 @@ Release Date: 2017-05-02 17:08:44
 
 // Scan parameters
 #define DEFAULT_SCAN_DURATION                 2000
+#define EXTENDED_SCAN_DURATION                7000
 #define DEFAULT_SCAN_WIND                     80
 #define DEFAULT_SCAN_INT                      80
 
@@ -133,10 +134,17 @@ Release Date: 2017-05-02 17:08:44
 #define DEFAULT_LINK_WHITE_LIST               FALSE
 
 //Manufactuer ID for advertising data
-#define MY_MANUFACTURER_ID                    0x1633
+#define MY_MANUFACTURER_ID_1                    0x1633
+#define MY_MANUFACTURER_ID_2                    0x1634
 
 //Time sync start message in advert data
+#define DEFFAULT_NO_MESSAGE                    0xFF
 #define TIME_SYNC_START                        42
+#define DIRECT_ADV_CONN                        43
+
+//Index for advert data positions
+#define MSG_TYPE_POS                           11
+#define ADDR_POS                               16
 
 // Type of Display to open
 #if !defined(Display_DISABLE_ALL)
@@ -185,6 +193,9 @@ Release Date: 2017-05-02 17:08:44
 #define TSYNC_COMPLETE_EVT                   Event_Id_12
 #define SCAN_REQ_TIMEOUT                     Event_Id_13
 #define DIR_ADV_TIMEOUT                      Event_Id_14
+#define START_DIR_ADV                        Event_Id_15
+#define START_EXTENDED_SCAN                  Event_Id_16
+#define END_EXTENDED_SCAN                  Event_Id_17
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -202,7 +213,10 @@ Release Date: 2017-05-02 17:08:44
                                              START_SCAN              | \
                                              TSYNC_COMPLETE_EVT      | \
                                              SCAN_REQ_TIMEOUT        | \
-                                             DIR_ADV_TIMEOUT)
+                                             DIR_ADV_TIMEOUT         | \
+                                             START_DIR_ADV           | \
+                                             START_EXTENDED_SCAN     | \
+                                             END_EXTENDED_SCAN)
 
 // Discovery states
 typedef enum {
@@ -226,8 +240,8 @@ typedef enum {
 
 // How often to perform periodic event (in msec)
 #define GLOBAL_TIME_CLOCK_PERIOD               1  //1ms clock time
-#define SCAN_REQ_DELAY_PERIOD                10000 //10s to wait for scan responses
-#define DIR_ADV_PERIOD                       5000 //5s wait time for dir advertising
+#define SCAN_REQ_DELAY_PERIOD                2000 //1s to wait for scan responses
+#define DIR_ADV_PERIOD                       2000 //5s wait time for dir advertising
 
 /*********************************************************************
 * TYPEDEFS
@@ -327,6 +341,7 @@ static uint8_t scanRspData[] =
 
 enum global_state_t{
   TSYNCED_SCANNING,
+  TSYNCED_EXTENDED_SCANNING,
   TSYNCED_ADVERTISING,
   UNSYNCED_SLAVE,
   TSYNCED_MASTER
@@ -339,8 +354,8 @@ enum unsynced_slave_state_t{
   CONNECTED
 };
 
-//static enum global_state_t global_state = UNSYNCED_SLAVE;
-static enum global_state_t global_state = TSYNCED_SCANNING;
+static enum global_state_t global_state = UNSYNCED_SLAVE;
+//static enum global_state_t global_state = TSYNCED_SCANNING;
 static enum unsynced_slave_state_t slave_state = INIT;
 
 //Global clock for time syncronization
@@ -361,6 +376,9 @@ enum tsync_slave_state_t{
 //LED pin states and handles
 static PIN_Handle ledPinHandle;
 static PIN_State ledPinState;
+
+//Extended scan boolean
+static bool first_extended_scan  = false;
 
 /*
  * Initial LED pin configuration table
@@ -392,11 +410,22 @@ static uint8_t advertData[] =
   LO_UINT16(SIMPLEPROFILE_SERV_UUID),
   HI_UINT16(SIMPLEPROFILE_SERV_UUID),
 
-  0x04,   //Advertising data
+  0x04,   //Type of adv data
   GAP_ADTYPE_MANUFACTURER_SPECIFIC,
-  LO_UINT16(MY_MANUFACTURER_ID),
-  HI_UINT16(MY_MANUFACTURER_ID),
-  TIME_SYNC_START
+  LO_UINT16(MY_MANUFACTURER_ID_1),
+  HI_UINT16(MY_MANUFACTURER_ID_2),
+  DEFFAULT_NO_MESSAGE,
+
+  0x09,     //Direct message addr
+  GAP_ADTYPE_MANUFACTURER_SPECIFIC,
+  LO_UINT16(MY_MANUFACTURER_ID_2),
+  HI_UINT16(MY_MANUFACTURER_ID_2),
+  DEFFAULT_NO_MESSAGE,
+  DEFFAULT_NO_MESSAGE,
+  DEFFAULT_NO_MESSAGE,
+  DEFFAULT_NO_MESSAGE,
+  DEFFAULT_NO_MESSAGE,
+  DEFFAULT_NO_MESSAGE
 };
 
 // pointer to allocate the connection handle map
@@ -457,6 +486,9 @@ static uint16_t connIndex = INVALID_CONNHANDLE;
 // Maximum number of connected devices
 static uint8_t maxNumBleConns = MAX_NUM_BLE_CONNS;
 
+//Stores my address
+static uint8_t myAddr[B_ADDR_LEN];
+
 /*********************************************************************
 * LOCAL FUNCTIONS
 */
@@ -500,6 +532,7 @@ static void addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestRepor
 static uint8_t *find_target_addr(void);
 static bool mr_directConnect(uint8_t addrType, uint8_t* addr);
 static bool is_timeSync_req(uint8_t * advData);
+static bool is_dirConnAddr_req(uint8_t * advData);
 static void add_to_timeSync_reqList(gapDeviceInfoEvent_t timeSyncSlave);
 static bool saved_time_sync_info(uint8_t *addr);
 static void reset_scan_discovery_info(void);
@@ -882,6 +915,31 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
             //Start scanning
             mr_doScan(0);
             PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
+          }else if(events & START_EXTENDED_SCAN){
+            global_state = TSYNCED_EXTENDED_SCANNING;
+          }
+        break;
+
+        case TSYNCED_EXTENDED_SCANNING:
+          if(!scanningStarted){
+            // Set scan duration
+            GAP_SetParamValue(TGAP_GEN_DISC_SCAN, EXTENDED_SCAN_DURATION);
+
+            first_extended_scan = true;
+
+            //Start scanning
+            mr_doScan(0);
+
+            Display_print0(dispHandle,17,0,"Extended scanning has started!");
+
+          }else if(events & END_EXTENDED_SCAN){
+            // Set default scan duration
+            GAP_SetParamValue(TGAP_GEN_DISC_SCAN, DEFAULT_SCAN_DURATION);
+
+            global_state = TSYNCED_SCANNING;
+            first_extended_scan = false;
+
+            Display_print0(dispHandle,17,0,"Extended scanning has timed out!");
           }
         break;
 
@@ -1311,6 +1369,9 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       //Configure the Scan Reuest report HCI command
       HCI_EXT_ScanReqRptCmd(HCI_EXT_ENABLE_SCAN_REQUEST_REPORT);
 
+      //Store my address
+      GAPRole_GetParameter(GAPROLE_BD_ADDR, &myAddr, NULL);
+
       //Start global clock to count time
       Util_startClock(&periodicClock);
 
@@ -1321,6 +1382,13 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
     case GAP_MAKE_DISCOVERABLE_DONE_EVENT:
     {
       Display_print0(dispHandle, MR_ROW_ADV, 0, "Advertising");
+      if(slave_state == PASSIVE_ADV){
+        //Start passive advertising clock
+        Util_startClock(&passiveAdvertClock);
+      }else if(slave_state == DIRECT_ADV){
+        //Start passive advertising clock
+          Util_startClock(&dirAdvClock);
+      }
     }
     break;
 
@@ -1331,6 +1399,12 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       if (linkDB_NumActive() < maxNumBleConns)
       {
         Display_print0(dispHandle, MR_ROW_ADV, 0, "Ready to Advertise");
+        if(slave_state == PASSIVE_ADV){
+          slave_state = DIRECT_ADV;
+          Event_post(syncEvent, START_DIR_ADV);
+        }else if(slave_state == DIRECT_ADV){
+          slave_state = INIT;
+        }
       }
       else
       {
@@ -1344,12 +1418,18 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
     {
       //Check if directed advertisement, if so, connect immediately
       if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_IND &&
-             saved_time_sync_info(pEvent->deviceInfo.addr)){
-        Display_print1(dispHandle,18,0,"Target connectable indir adv addr: %s",
+             saved_time_sync_info(pEvent->deviceInfo.addr)
+             && is_dirConnAddr_req(pEvent->deviceInfo.pEvtData)){
+        Display_print1(dispHandle,18,0,"Target connectable dir adv addr: %s",
                          (const char*)Util_convertBdAddr2Str(pEvent->deviceInfo.addr));
+
+        first_extended_scan = false;
 
         //Stop scanning now
         mr_doScan(0);
+
+        //Reset scan duration
+        GAP_SetParamValue(TGAP_GEN_DISC_SCAN, DEFAULT_SCAN_DURATION);
 
         //Turn of Red LED
         PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
@@ -1357,12 +1437,13 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         //Change state to tsynced master
         global_state = TSYNCED_MASTER;
 
-        //Connect now to slave
-        //mr_doConnect(0);
+        //Connect now to this slave
         mr_directConnect(pEvent->deviceInfo.addrType,pEvent->deviceInfo.addr);
 
       }else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_SCAN_IND &&
               is_timeSync_req(pEvent->deviceInfo.pEvtData)){
+        if(numTimeSyncRequests == 0)
+          Event_post(syncEvent, START_EXTENDED_SCAN);
         add_to_timeSync_reqList(pEvent->deviceInfo);
       }
     }
@@ -1418,6 +1499,9 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       }
 
       Display_print1(dispHandle, MR_ROW_STATUS1, 0, "Devices Found %d", pEvent->discCmpl.numDevs);
+      //Send end of scan event if in extended scan state
+      if(first_extended_scan && global_state == TSYNCED_EXTENDED_SCANNING)
+        Event_post(syncEvent, END_EXTENDED_SCAN);
     }
     break;
 
@@ -2474,6 +2558,7 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
     else if(events & TSYNC_COMPLETE_EVT){
       //Reset time sync req list
       memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
+      numTimeSyncRequests = 0;
 
       //Tsync is complete and host has been disconnected
       global_state = TSYNCED_SCANNING;
@@ -2483,70 +2568,65 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
     uint8_t advType;
     switch(slave_state){
       case INIT:
+        //Reset scanReqList
+        memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
+        numScanRequests = 0;
+
         //Set advertising type to scannable, non-connectable indirect advertising
         advType = GAP_ADTYPE_ADV_SCAN_IND;
         GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
 
+        //Set advertising to time-sync
+        advertData[MSG_TYPE_POS] = TIME_SYNC_START;
+        GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
+
+        //Turn on advertising
         mr_doAdvertise(0);
+
         //Turn on Red LED
         PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
 
-        //Reset scanReqList
-        memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
-
-        //Start passive advertising clock
-        Util_startClock(&passiveAdvertClock);
-
         slave_state = PASSIVE_ADV;
+
         break;
       case PASSIVE_ADV:
         if(events & SCAN_REQ_TIMEOUT){
-          //Pick out the best addr to advertise to
+          //Turn off advertising
+          mr_doAdvertise(0);
+        }
+        break;
+
+      case DIRECT_ADV:
+        if(events & START_DIR_ADV){
+
           uint8_t *target_addr = find_target_addr();
           if(target_addr == NULL){
             Display_print0(dispHandle,20,0,"No target address found!");
-
-            //scanReqList should be 0 as is, but anyway doesnt hurt
-            memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
-
             slave_state = INIT;
             return;
           }
-          //Turn off advertising
-          mr_doAdvertise(0);
 
           //Change to connectable indirected advertising
           uint8_t advType = GAP_ADTYPE_ADV_IND;
           GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
 
-          /*
-          uint8_t addrType = ADDRMODE_PUBLIC;
-          GAPRole_SetParameter(GAPROLE_ADV_DIRECT_TYPE, sizeof(uint8_t), &addrType, NULL);
-
-          //Set direct advertising
-          GAPRole_SetParameter(GAPROLE_ADV_DIRECT_ADDR, B_ADDR_LEN, target_addr, NULL);
+          //Change advertising parameters
+          advertData[MSG_TYPE_POS] = DIRECT_ADV_CONN;
+          VOID memcpy(&advertData[ADDR_POS], target_addr, B_ADDR_LEN);
+          GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
 
           //Start advertising again
-          Display_print1(dispHandle,20,0,"Direct advertising has started!, target addr: %s",
-                         (const char*)Util_convertBdAddr2Str(target_addr));
-                         */
           mr_doAdvertise(0);
-          Display_print0(dispHandle,20,0,"Indirect advertising has started!");
-          slave_state = DIRECT_ADV;
+          Display_print1(dispHandle,20,0,"direct advertising has started to: %s!",
+                         (const char*)Util_convertBdAddr2Str(target_addr));
 
-          //Start timer
-          Util_startClock(&dirAdvClock);
         }
-        break;
-
-      case DIRECT_ADV:
-        if(events & DIR_ADV_TIMEOUT){
+        else if(events & DIR_ADV_TIMEOUT){
           //Return back to INIT
-          Display_print0(dispHandle,20,0,"Indirect advertising has timed out!");
+          Display_print0(dispHandle,20,0,"direct advertising has timed out!");
 
-          //Reset scanReqList
-          memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
-          slave_state = INIT;
+          //Turn off advertising
+          mr_doAdvertise(0);
         }
         break;
 
@@ -2631,7 +2711,7 @@ static void add_to_timeSync_reqList(gapDeviceInfoEvent_t deviceInfo)
   numTimeSyncRequests++;
 
   Display_print2(dispHandle, 21, 0, "Num time sync requests: %d, rssi: %d",
-                                   numScanRequests, deviceInfo.rssi);
+                 numTimeSyncRequests, deviceInfo.rssi);
 }
 
 //Find the target address to direct advertise to
@@ -2656,7 +2736,14 @@ static uint8_t *find_target_addr(void)
 //Check if data packet is for time synchronization
 static bool is_timeSync_req(uint8_t * advData)
 {
-  return (advData[11] == TIME_SYNC_START);
+  return (advData[MSG_TYPE_POS] == TIME_SYNC_START);
+}
+
+//Check if data packet contains connect target address
+static bool is_dirConnAddr_req(uint8_t * advData)
+{
+  return ((advData[MSG_TYPE_POS] == DIRECT_ADV_CONN)
+          && (memcmp(&advData[ADDR_POS], myAddr, B_ADDR_LEN) == 0));
 }
 
 //Check if time sync information has been saved
