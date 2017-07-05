@@ -108,7 +108,7 @@ Release Date: 2017-05-02 17:08:44
 
 // Scan parameters
 #define DEFAULT_SCAN_DURATION                 2000
-#define EXTENDED_SCAN_DURATION                7000
+#define EXTENDED_SCAN_DURATION                2000
 #define DEFAULT_SCAN_WIND                     80
 #define DEFAULT_SCAN_INT                      80
 
@@ -362,8 +362,8 @@ enum unsynced_slave_state_t{
   CONNECTED
 };
 
-static enum global_state_t global_state = UNSYNCED_SLAVE;
-//static enum global_state_t global_state = TSYNCED_SCANNING;
+//static enum global_state_t global_state = UNSYNCED_SLAVE;
+static enum global_state_t global_state = TSYNCED_SCANNING;
 static enum unsynced_slave_state_t slave_state = INIT;
 
 //Global clock for time syncronization
@@ -921,7 +921,7 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
             mr_doScan(0);
             PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
           }else if(events & START_EXTENDED_SCAN){
-            global_state = WAITING_FOR_CUR_SCAN_END;
+           // global_state = WAITING_FOR_CUR_SCAN_END;
           }
         break;
 
@@ -1501,7 +1501,6 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       //Send end of scan event if in extended scan state
       if(global_state == TSYNCED_EXTENDED_SCANNING)
         Event_post(syncEvent, END_EXTENDED_SCAN);
-
     }
     break;
 
