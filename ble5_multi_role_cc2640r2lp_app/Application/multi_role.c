@@ -86,6 +86,8 @@ Release Date: 2017-05-02 17:08:44
 * CONSTANTS
 */
 
+//#define DEBUG_TSYNC   //Debug printfs for time syncing
+
 // Maximum number of scan responses
 // this can only be set to 15 because that is the maximum
 // amount of item actions the menu module supports
@@ -194,8 +196,6 @@ Release Date: 2017-05-02 17:08:44
 #define SCAN_REQ_TIMEOUT                     Event_Id_13
 #define DIR_ADV_TIMEOUT                      Event_Id_14
 #define START_DIR_ADV                        Event_Id_15
-#define START_EXTENDED_SCAN                  Event_Id_16
-#define END_EXTENDED_SCAN                    Event_Id_17
 #define DISCOVERABLE_NOW                     Event_Id_18
 #define NOT_DISCOVERABLE                     Event_Id_19
 #define CONNECTION_COMPLETE                  Event_Id_20
@@ -218,8 +218,6 @@ Release Date: 2017-05-02 17:08:44
                                              SCAN_REQ_TIMEOUT        | \
                                              DIR_ADV_TIMEOUT         | \
                                              START_DIR_ADV           | \
-                                             START_EXTENDED_SCAN     | \
-                                             END_EXTENDED_SCAN       | \
                                              DISCOVERABLE_NOW        | \
                                              NOT_DISCOVERABLE        | \
                                              CONNECTION_COMPLETE)
@@ -920,41 +918,6 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
             //Start scanning
             mr_doScan(0);
             PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
-          }else if(events & START_EXTENDED_SCAN){
-           // global_state = WAITING_FOR_CUR_SCAN_END;
-          }
-        break;
-
-        case WAITING_FOR_CUR_SCAN_END:
-          if(!scanningStarted){
-            // Set scan duration
-            GAP_SetParamValue(TGAP_GEN_DISC_SCAN, EXTENDED_SCAN_DURATION);
-
-            //Start scanning
-            mr_doScan(0);
-
-            PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
-
-            Display_print0(dispHandle, 17, 0, "Extended scanning has started!");
-
-            global_state = TSYNCED_EXTENDED_SCANNING;
-          }
-        break;
-
-        case TSYNCED_EXTENDED_SCANNING:
-          if(events & END_EXTENDED_SCAN){
-            // Set default scan duration
-            GAP_SetParamValue(TGAP_GEN_DISC_SCAN, DEFAULT_SCAN_DURATION);
-
-            PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
-
-            Display_print0(dispHandle, 17, 0, "Extended scanning has timed out!");
-
-            //Reset time sync req list
-            memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
-            numTimeSyncRequests = 0;
-
-            global_state = TSYNCED_SCANNING;
           }
         break;
 
@@ -1122,8 +1085,9 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
     attHandleValueNoti_t *msg_ptr = &(pMsg->msg.handleValueNoti);
     int len = msg_ptr->len;
     memcpy(&T2, msg_ptr->pValue,len);
+#ifdef DEBUG_TSYNC
     Display_print1(dispHandle, 12, 0, "T2: %u", T2);
-
+#endif
     Event_post(syncEvent, DELAY_RSP);
   }
 
@@ -1424,8 +1388,10 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_IND &&
              saved_time_sync_info(pEvent->deviceInfo.addr)
             && is_dirConnAddr_req(pEvent->deviceInfo.pEvtData)){
+#ifdef DEBUG_TSYNC
         Display_print1(dispHandle,18,0,"Target connectable dir adv addr: %s",
                          (const char*)Util_convertBdAddr2Str(pEvent->deviceInfo.addr));
+#endif
 
         //Stop scanning now
         mr_doScan(0);
@@ -1441,8 +1407,6 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
 
       }else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_SCAN_IND &&
               is_timeSync_req(pEvent->deviceInfo.pEvtData)){
-        if(numTimeSyncRequests == 0)
-          Event_post(syncEvent, START_EXTENDED_SCAN);
         add_to_timeSync_reqList(pEvent->deviceInfo);
       }
     }
@@ -1498,9 +1462,6 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       }
 
       Display_print1(dispHandle, MR_ROW_STATUS1, 0, "Devices Found %d", pEvent->discCmpl.numDevs);
-      //Send end of scan event if in extended scan state
-      if(global_state == TSYNCED_EXTENDED_SCANNING)
-        Event_post(syncEvent, END_EXTENDED_SCAN);
     }
     break;
 
@@ -1673,7 +1634,9 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
     if(tsync_slave_state == WAIT_FOR_SYNC){
       T1_prime = get_my_global_time();
       SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &T1);
+#ifdef DEBUG_TSYNC
       Display_print2(dispHandle, MR_ROW_STATUS2, 0, "t1: %u, t1_prime: %u", (uint32_t)T1, (uint32_t)T1_prime);
+#endif
 
       //Notify master of T2
       Event_post(syncEvent, NOTIFY_CLIENT);
@@ -1681,11 +1644,12 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
       tsync_slave_state = WAIT_FOR_DELAY_RSP;
     }else{
       SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &T2_prime);
-
+#ifdef DEBUG_TSYNC
       Display_print1(dispHandle, MR_ROW_STATUS2+2, 0, "t1 : %u", (uint32_t)T1);
       Display_print1(dispHandle, MR_ROW_STATUS2+3, 0, "t1_prime: %u", (uint32_t)T1_prime);
       Display_print1(dispHandle, MR_ROW_STATUS2+4, 0, "t2: %u", (uint32_t)T2);
       Display_print1(dispHandle, MR_ROW_STATUS2+5, 0, "t2_prime: %u", (uint32_t)T2_prime);
+#endif
 
       perform_time_sync();
 
@@ -1697,13 +1661,16 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
   case SIMPLEPROFILE_CHAR3:
     // Get new value
     SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &newValue);
-
+#ifdef DEBUG_TSYNC
     Display_print1(dispHandle, MR_ROW_STATUS2, 0, "Char 3: %d", (uint16_t)newValue);
+#endif
     break;
 
   case SIMPLEPROFILE_CHAR5:
     //Client config callback situation
+#ifdef DEBUG_TSYNC
     Display_print0(dispHandle, 15, 0, "Client has enabled config!");
+#endif
     break;
 
   default:
@@ -1920,7 +1887,9 @@ static void multi_role_processGATTDiscEvent(gattMsgEvent_t *pMsg)
                                                        pMsg->msg.readByTypeRsp.pDataList[att_len*i + 1]);
         }
 
+#ifdef DEBUG_TSYNC
         Display_print0(dispHandle,6,0,"recieved all characteristics!");
+#endif
         Event_post(syncEvent, NOTIFY_ENABLE);
       }
     }
@@ -2523,7 +2492,6 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
     if (events & NOTIFY_ENABLE){
       //Write to enable configuration callback
       if(enable_notifs(0) == FAILURE){
-        Display_print0(dispHandle,15,0,"Chill bro!");
         Event_post(syncEvent, NOTIFY_ENABLE);
       }else{
         //Send time to T1
@@ -2534,10 +2502,14 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
        //Notify the client, call SetParameter
        T1 = get_my_global_time();
        if(write_to_server(0,T1) == FAILURE){
+#ifdef DEBUG_TSYNC
          Display_print0(dispHandle,15,0,"Error! Write to server failed!");
+#endif
          Event_post(syncEvent, WRITE_TO_SERVER);
        }else{
+#ifdef DEBUG_TSYNC
          Display_print0(dispHandle,15,0,"Success! Wrote to server!");
+#endif
        }
      }
     else if(events & DELAY_RSP){
@@ -2547,7 +2519,9 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
         Display_print0(dispHandle,15,0,"Error! Write to server failed!");
         Event_post(syncEvent, WRITE_TO_SERVER);
       }else{
+#ifdef DEBUG_TSYNC
         Display_print0(dispHandle,15,0,"Success! Wrote to server!");
+#endif
       }
     }
     else if(events & TSYNC_COMPLETE_EVT){
@@ -2603,7 +2577,9 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
 
           uint8_t *target_addr = find_target_addr();
           if(target_addr == NULL){
+#ifdef DEBUG_TSYNC
             Display_print0(dispHandle,20,0,"No target address found!");
+#endif
             slave_state = INIT;
             return;
           }
@@ -2619,9 +2595,10 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
 
           //Start advertising again
           mr_doAdvertise(0);
+#ifdef DEBUG_TSYNC
           Display_print1(dispHandle,20,0,"direct advertising has started to: %s!",
                          (const char*)Util_convertBdAddr2Str(target_addr));
-
+#endif
         }
         else if(events & DISCOVERABLE_NOW){
           //Start direct advertisement clock for dir advertising
@@ -2629,7 +2606,9 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
         }
         else if(events & DIR_ADV_TIMEOUT){
           //Return back to INIT
+#ifdef DEBUG_TSYNC
           Display_print0(dispHandle,20,0,"direct advertising has timed out!");
+#endif
 
           //Turn off advertising
           mr_doAdvertise(0);
@@ -2660,7 +2639,7 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
           T2 = get_my_global_time();
           if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,SIMPLEPROFILE_CHAR4_LEN,&T2) == FAILURE){
             Display_print0(dispHandle, 15, 0, "Error! Notification send failed!");
-           }
+          }
         }
         else if (events & TSYNC_COMPLETE_EVT){
           //Disconnect and change state
@@ -2706,8 +2685,10 @@ static void addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestRepor
   scanReqList[numScanRequests].addrType = scanRequestReport->peerAddrType;
   numScanRequests++;
 
+#ifdef DEBUG_TSYNC
   Display_print2(dispHandle, 21, 0, "Num scan requests: %d, rssi: %d",
                                    numScanRequests, scanRequestReport->rssi);
+#endif
 }
 
 //Add time Sync requests information to list
@@ -2737,8 +2718,10 @@ static void add_to_timeSync_reqList(gapDeviceInfoEvent_t deviceInfo)
   timeSyncReqList[numTimeSyncRequests].addrType = deviceInfo.addrType;
   numTimeSyncRequests++;
 
+#ifdef DEBUG_TSYNC
   Display_print3(dispHandle, 21, 0, "Num time sync requests: %d, rssi: %d, count: %d",
                  numTimeSyncRequests, deviceInfo.rssi, count++);
+#endif
 }
 
 //Find the target address to direct advertise to
