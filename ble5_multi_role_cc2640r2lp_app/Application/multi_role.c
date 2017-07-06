@@ -143,6 +143,7 @@ Release Date: 2017-05-02 17:08:44
 #define DEFFAULT_NO_MESSAGE                    0xFF
 #define TIME_SYNC_START                        42
 #define DIRECT_ADV_CONN                        43
+#define ROUTE_DISC                             44
 
 //Index for advert data positions
 #define MSG_TYPE_POS                           11
@@ -196,6 +197,8 @@ Release Date: 2017-05-02 17:08:44
 #define SCAN_REQ_TIMEOUT                     Event_Id_13
 #define DIR_ADV_TIMEOUT                      Event_Id_14
 #define START_DIR_ADV                        Event_Id_15
+#define START_ROUTE_DISC                     Event_Id_16
+#define END_ROUTE_SCAN                       Event_Id_17
 #define DISCOVERABLE_NOW                     Event_Id_18
 #define NOT_DISCOVERABLE                     Event_Id_19
 #define CONNECTION_COMPLETE                  Event_Id_20
@@ -218,6 +221,8 @@ Release Date: 2017-05-02 17:08:44
                                              SCAN_REQ_TIMEOUT        | \
                                              DIR_ADV_TIMEOUT         | \
                                              START_DIR_ADV           | \
+                                             START_ROUTE_DISC        | \
+                                             END_ROUTE_SCAN          | \
                                              DISCOVERABLE_NOW        | \
                                              NOT_DISCOVERABLE        | \
                                              CONNECTION_COMPLETE)
@@ -246,6 +251,15 @@ typedef enum {
 #define GLOBAL_TIME_CLOCK_PERIOD               1  //1ms clock time
 #define SCAN_REQ_DELAY_PERIOD                2000 //1s to wait for scan responses
 #define DIR_ADV_PERIOD                       4000 //5s wait time for dir advertising
+#define ROUTE_DISC_DELAY                     15000 // 10s wait time for route discovery
+
+//Invalid node info
+#define INVALID_NODE_INFO -1
+#define VALID_NODE_INFO 16
+
+//Route direc adv max count
+#define ROUTE_DIRECT_ADV_MAX_COUNT        3
+#define ROUTE_DIRECT_CONN_MAX_COUNT       4
 
 /*********************************************************************
 * TYPEDEFS
@@ -288,6 +302,16 @@ typedef struct
   int8_t rssi;                      //RSSI value of scan requester
 } mrDevRec_t;
 
+//Link for peer node information
+typedef struct
+{
+  int8_t valid;                     //Validity check for the node info
+  uint8_t addr[B_ADDR_LEN];         // Device's Address
+  uint8_t strAddr[B_STR_ADDR_LEN];  // Device Address as String
+  int8_t rssi;                      //RSSI of channel
+  //More fields to be added
+}mrNode_t;
+
 // entry to map index to connection handle and store address string for menu module
 typedef struct
 {
@@ -321,6 +345,8 @@ static ICall_SyncHandle syncEvent;
 static Clock_Struct periodicClock;
 static Clock_Struct passiveAdvertClock;
 static Clock_Struct dirAdvClock;
+static Clock_Struct routeDiscClock;
+static Clock_Struct routeScanClock;
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
@@ -345,7 +371,10 @@ static uint8_t scanRspData[] =
 
 enum global_state_t{
   TSYNCED_SCANNING,
-  WAITING_FOR_CUR_SCAN_END,
+  TSYNCED_ROUTE_DISCOVERY,
+  TSYNCED_ROUTE_CONNECT,
+  TSYNCED_ROUTE_CONNECTING,
+  TSYNCED_ROUTE_CONNECTED,
   TSYNCED_EXTENDED_SCANNING,
   TSYNCED_ADVERTISING,
   UNSYNCED_SLAVE,
@@ -366,6 +395,11 @@ static enum unsynced_slave_state_t slave_state = INIT;
 
 //Global clock for time syncronization
 static uint64_t my_global_time;
+
+//Route direct adv count
+static int route_direct_adv_count = 0;
+static int route_direct_conn_count = 0;
+//static int random_time_count = 0;
 
 //Time variables used for synchronization of slave
 static int64_t T1;
@@ -467,6 +501,9 @@ static int numScanRequests;
 static mrDevRec_t timeSyncReqList[DEFAULT_MAX_TSYNC_REQ];
 static int numTimeSyncRequests;
 
+//Next hop information
+static mrNode_t next_hop_node;
+
 // Value to write
 static uint8_t charVal = 0;
 
@@ -526,6 +563,8 @@ static void multi_role_pairStateCB(uint16_t connHandle, uint8_t state,
 static void global_time_clockHandler(UArg arg);
 static void scanRequest_timeoutHandler(UArg arg);
 static void dirAdv_clockHandler(UArg arg);
+static void routeDisc_clockHandler(UArg arg);
+static void routeScan_clockHandler(UArg arg);
 static bool enable_notifs(uint8_t index);
 static uint64_t get_my_global_time(void);
 static bool write_to_server(uint8_t index, uint64_t time);
@@ -626,6 +665,10 @@ static void multi_role_init(void)
                              SCAN_REQ_DELAY_PERIOD, 0, false, SCAN_REQ_TIMEOUT);
   Util_constructClock(&dirAdvClock, dirAdv_clockHandler,
                         DIR_ADV_PERIOD, 0, false, DIR_ADV_TIMEOUT);
+  Util_constructClock(&routeDiscClock, routeDisc_clockHandler,
+                      ROUTE_DISC_DELAY, 0, false, START_ROUTE_DISC);
+  Util_constructClock(&routeScanClock, routeScan_clockHandler,
+                      DEFAULT_SCAN_DURATION, 0, false, END_ROUTE_SCAN);
 
   // Init keys and LCD
   Board_initKeys(multi_role_keyChangeHandler);
@@ -911,6 +954,10 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
         }
       }
 
+      if(events & START_SCAN){
+          Display_print1(dispHandle,12,0,"p: %d", my_global_time);
+      }
+
        //Manage global application states here
       switch(global_state){
         case TSYNCED_SCANNING:
@@ -918,7 +965,125 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
             //Start scanning
             mr_doScan(0);
             PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
+          }else if(events & START_ROUTE_DISC){
+            //Starting route discovery
+            Display_print0(dispHandle, 15, 0, "Starting route discovery!");
+
+            //Set advertising type to scannable, non-connectable indirect advertising
+            uint8_t advType = GAP_ADTYPE_ADV_SCAN_IND;
+            GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
+
+            //Set advertising to time-sync
+            advertData[MSG_TYPE_POS] = ROUTE_DISC;
+            GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
+
+            global_state = TSYNCED_ROUTE_DISCOVERY;
           }
+        break;
+
+        case TSYNCED_ROUTE_DISCOVERY:
+          if(events & START_SCAN){
+            //Turn on advertising
+            mr_doAdvertise(0);
+          }else if(events & DISCOVERABLE_NOW){
+            //Start discovery wait clock
+            Util_startClock(&routeScanClock);
+
+            PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
+
+            Display_print0(dispHandle, 15,0 ,"Started route discovery non connectable adv!");
+          }else if(events & END_ROUTE_SCAN){
+            //Turn off advertising
+            mr_doAdvertise(0);
+          }else if(events & NOT_DISCOVERABLE){
+            //Just turn off LED and switch state
+            PIN_setOutputValue(ledPinHandle, Board_GLED, 0);
+
+            global_state = TSYNCED_ROUTE_CONNECT;
+          }
+        break;
+
+        case TSYNCED_ROUTE_CONNECT:
+          if(events & START_SCAN){
+            uint8_t * target_addr = find_target_addr();
+            if(target_addr == NULL){
+
+              route_direct_adv_count++;
+              Display_print0(dispHandle, 15,0 ,"No target addr found! Go back!");
+
+              if(route_direct_adv_count == ROUTE_DIRECT_ADV_MAX_COUNT){
+                //Reset all info
+                memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
+                numScanRequests = 0;
+
+                global_state = TSYNCED_SCANNING;
+                route_direct_adv_count = 0;
+                Display_print0(dispHandle, 15,0 ,"Route busy, try again later!");
+              }else{
+                global_state = TSYNCED_ROUTE_DISCOVERY;
+              }
+
+            }else{
+              //Change to connectable indirected advertising
+              uint8_t advType = GAP_ADTYPE_ADV_IND;
+              GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
+
+              //Change advertising parameters
+              advertData[MSG_TYPE_POS] = DIRECT_ADV_CONN;
+              VOID memcpy(&advertData[ADDR_POS], target_addr, B_ADDR_LEN);
+              GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
+
+              mr_doAdvertise(0);
+
+              Display_print1(dispHandle, 15,0 ,"Route direct adv to: %s",
+                           (const char*)Util_convertBdAddr2Str(target_addr));
+            }
+          }else if(events & DISCOVERABLE_NOW){
+            //Start discovery wait clock
+            Util_startClock(&routeScanClock);
+
+            PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
+          }else if(events & END_ROUTE_SCAN){
+            //stop advertising, try again
+            mr_doAdvertise(0);
+          }else if(events & NOT_DISCOVERABLE){
+            PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
+            Display_print0(dispHandle, 15,0 ,"Route direct adv timed out!");
+            route_direct_conn_count++;
+            if(route_direct_conn_count == ROUTE_DIRECT_CONN_MAX_COUNT){
+              //Reset all info
+              memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
+              numScanRequests = 0;
+
+              global_state = TSYNCED_ROUTE_DISCOVERY;
+              route_direct_conn_count = 0;
+              Display_print0(dispHandle, 15,0 ,"Not connecting, try again later!");
+            }
+          }
+        break;
+
+        case TSYNCED_ROUTE_CONNECTING:
+        if(events & CONNECTION_COMPLETE){
+          //Stop advertising
+          mr_doAdvertise(0);
+
+          //Save this as next hop address
+          next_hop_node.valid = VALID_NODE_INFO;
+          VOID memcpy(next_hop_node.addr, find_target_addr(), B_ADDR_LEN);
+        }
+        else if(events & NOT_DISCOVERABLE){
+          global_state = TSYNCED_ROUTE_CONNECTED;
+          Display_print0(dispHandle, 15,0, "Connected to route!");
+
+          PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
+          //Reset all info
+          memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
+          numScanRequests = 0;
+        }
+        break;
+
+        case TSYNCED_ROUTE_CONNECTED:
+
         break;
 
         case TSYNCED_ADVERTISING:
@@ -1351,6 +1516,9 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       //Store my address
       GAPRole_GetParameter(GAPROLE_BD_ADDR, &myAddr, NULL);
 
+      //Invalidate next hop node
+      next_hop_node.valid = INVALID_NODE_INFO;
+
       //Start global clock to count time
       Util_startClock(&periodicClock);
 
@@ -1396,7 +1564,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         //Stop scanning now
         mr_doScan(0);
 
-        //Turn of Red LED
+        //Turn off Red LED
         PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
 
         //Reset scan duration
@@ -1497,12 +1665,14 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         tbm_goTo(&mrMenuMain);
 
         // Start service discovery if master
-        if(global_state != UNSYNCED_SLAVE){
+        if(global_state == TSYNCED_SCANNING){
           global_state = TSYNCED_MASTER;
           multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
+        }else if(global_state == TSYNCED_ROUTE_CONNECTING){
+          multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
+        }else if(global_state == UNSYNCED_SLAVE){
+          slave_state = CONNECTING;
         }
-
-        slave_state = CONNECTING;
         Event_post(syncEvent, CONNECTION_COMPLETE);
       }
       // If the connection was not successfully established
@@ -2062,8 +2232,9 @@ static void global_time_clockHandler(UArg arg)
 {
   //Increment global time
   my_global_time++;
-  if(my_global_time % 4000 == 0)
+  if(my_global_time % 4000 == 0){
     Event_post(syncEvent, START_SCAN);
+  }
 }
 
 /*********************************************************************
@@ -2074,6 +2245,30 @@ static void global_time_clockHandler(UArg arg)
  * @param   arg - event type
  */
 static void dirAdv_clockHandler(UArg arg)
+{
+  Event_post(syncEvent, arg);
+}
+
+/*********************************************************************
+ * @fn      routeDisc_clockHandler
+ *
+ * @brief   Handler function for route discovery
+ *
+ * @param   arg - event type
+ */
+static void routeDisc_clockHandler(UArg arg)
+{
+  Event_post(syncEvent, arg);
+}
+
+/*********************************************************************
+ * @fn      routeScan_clockHandler
+ *
+ * @brief   Handler function for route Scanning
+ *
+ * @param   arg - event type
+ */
+static void routeScan_clockHandler(UArg arg)
 {
   Event_post(syncEvent, arg);
 }
@@ -2529,6 +2724,10 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
       memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
       numTimeSyncRequests = 0;
 
+      //If the no links exist, initiate route discovery
+      if(next_hop_node.valid == INVALID_NODE_INFO)
+        Util_startClock(&routeDiscClock);
+
       //Tsync is complete and host has been disconnected
       global_state = TSYNCED_SCANNING;
     }
@@ -2645,6 +2844,10 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
           //Disconnect and change state
           mr_doDisconnect(0);
 
+          //If the no links exist, initiate route discovery
+          if(next_hop_node.valid == INVALID_NODE_INFO)
+            Util_startClock(&routeDiscClock);
+
           //Reset scanReqList
           memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
           numScanRequests = 0;
@@ -2694,7 +2897,6 @@ static void addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestRepor
 //Add time Sync requests information to list
 static void add_to_timeSync_reqList(gapDeviceInfoEvent_t deviceInfo)
 {
-    static int count;
   if(numTimeSyncRequests == DEFAULT_MAX_SCAN_REQ)
     return;
   uint8_t *peerAddr = deviceInfo.addr;
@@ -2746,7 +2948,7 @@ static uint8_t *find_target_addr(void)
 //Check if data packet is for time synchronization
 static bool is_timeSync_req(uint8_t * advData)
 {
-  return (advData[MSG_TYPE_POS] == TIME_SYNC_START);
+  return (advData[MSG_TYPE_POS] == TIME_SYNC_START || advData[MSG_TYPE_POS] == ROUTE_DISC);
 }
 
 //Check if data packet contains connect target address
