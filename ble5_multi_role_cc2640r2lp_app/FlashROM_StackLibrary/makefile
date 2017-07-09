@@ -10,6 +10,7 @@ GEN_OPTS__FLAG := --cmd_file="configPkg/compiler.opt"
 GEN_CMDS__FLAG := -l"configPkg/linker.cmd"
 
 ORDERED_OBJS += \
+"./Application/aes.obj" \
 "./Application/board_key.obj" \
 "./Application/hal_assert.obj" \
 "./Application/multi_role.obj" \
@@ -203,8 +204,8 @@ ble5_multi_role_cc2640r2lp_app.hex: $(EXE_OUTPUTS)
 clean:
 	-$(RM) $(GEN_CMDS__QUOTED)$(GEN_MISC_FILES__QUOTED)$(BIN_OUTPUTS__QUOTED)$(GEN_FILES__QUOTED)$(EXE_OUTPUTS__QUOTED)$(GEN_OPTS__QUOTED)
 	-$(RMDIR) $(GEN_MISC_DIRS__QUOTED)
-	-$(RM) "Application\board_key.obj" "Application\hal_assert.obj" "Application\multi_role.obj" "Application\multi_role_menu.obj" "Application\two_btn_menu.obj" "Application\util.obj" "Drivers\ECC\ECCROMCC26XX.obj" "Drivers\RF\RFCC26XX_singleMode.obj" "Drivers\TRNG\TRNGCC26XX.obj" "ICall\icall.obj" "ICall\icall_cc2650.obj" "ICall\icall_user_config.obj" "ICallBLE\ble_user_config.obj" "ICallBLE\icall_api_lite.obj" "PROFILES\devinfoservice.obj" "PROFILES\gatt_uuid.obj" "PROFILES\gattservapp_util.obj" "PROFILES\multi.obj" "PROFILES\simple_gatt_profile.obj" "Startup\board.obj" "Startup\ccfg_app_ble.obj" "Startup\main.obj" 
-	-$(RM) "Application\board_key.d" "Application\hal_assert.d" "Application\multi_role.d" "Application\multi_role_menu.d" "Application\two_btn_menu.d" "Application\util.d" "Drivers\ECC\ECCROMCC26XX.d" "Drivers\RF\RFCC26XX_singleMode.d" "Drivers\TRNG\TRNGCC26XX.d" "ICall\icall.d" "ICall\icall_cc2650.d" "ICall\icall_user_config.d" "ICallBLE\ble_user_config.d" "ICallBLE\icall_api_lite.d" "PROFILES\devinfoservice.d" "PROFILES\gatt_uuid.d" "PROFILES\gattservapp_util.d" "PROFILES\multi.d" "PROFILES\simple_gatt_profile.d" "Startup\board.d" "Startup\ccfg_app_ble.d" "Startup\main.d" 
+	-$(RM) "Application\aes.obj" "Application\board_key.obj" "Application\hal_assert.obj" "Application\multi_role.obj" "Application\multi_role_menu.obj" "Application\two_btn_menu.obj" "Application\util.obj" "Drivers\ECC\ECCROMCC26XX.obj" "Drivers\RF\RFCC26XX_singleMode.obj" "Drivers\TRNG\TRNGCC26XX.obj" "ICall\icall.obj" "ICall\icall_cc2650.obj" "ICall\icall_user_config.obj" "ICallBLE\ble_user_config.obj" "ICallBLE\icall_api_lite.obj" "PROFILES\devinfoservice.obj" "PROFILES\gatt_uuid.obj" "PROFILES\gattservapp_util.obj" "PROFILES\multi.obj" "PROFILES\simple_gatt_profile.obj" "Startup\board.obj" "Startup\ccfg_app_ble.obj" "Startup\main.obj" 
+	-$(RM) "Application\aes.d" "Application\board_key.d" "Application\hal_assert.d" "Application\multi_role.d" "Application\multi_role_menu.d" "Application\two_btn_menu.d" "Application\util.d" "Drivers\ECC\ECCROMCC26XX.d" "Drivers\RF\RFCC26XX_singleMode.d" "Drivers\TRNG\TRNGCC26XX.d" "ICall\icall.d" "ICall\icall_cc2650.d" "ICall\icall_user_config.d" "ICallBLE\ble_user_config.d" "ICallBLE\icall_api_lite.d" "PROFILES\devinfoservice.d" "PROFILES\gatt_uuid.d" "PROFILES\gattservapp_util.d" "PROFILES\multi.d" "PROFILES\simple_gatt_profile.d" "Startup\board.d" "Startup\ccfg_app_ble.d" "Startup\main.d" 
 	-@echo 'Finished clean'
 	-@echo ' '
 
