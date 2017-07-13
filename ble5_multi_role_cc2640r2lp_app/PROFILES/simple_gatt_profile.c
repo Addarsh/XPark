@@ -132,7 +132,7 @@ static CONST gattAttrType_t simpleProfileService = { ATT_BT_UUID_SIZE, simplePro
 
 
 // Simple Profile Characteristic 1 Properties
-static uint8 simpleProfileChar1Props = GATT_PROP_READ | GATT_PROP_WRITE;
+static uint8 simpleProfileChar1Props = GATT_PROP_READ | GATT_PROP_WRITE | GATT_PROP_AUTHEN;
 
 // Characteristic 1 Value
 static uint8 simpleProfileChar1[SIMPLEPROFILE_CHAR1_LEN] = {0,0,0,0,0,0,0,0};
@@ -162,7 +162,7 @@ static uint8 simpleProfileChar3UserDesp[17] = "Characteristic 3";
 
 
 // Simple Profile Characteristic 4 Properties
-static uint8 simpleProfileChar4Props = GATT_PROP_NOTIFY;
+static uint8 simpleProfileChar4Props = GATT_PROP_NOTIFY | GATT_PROP_AUTHEN;
 
 // Characteristic 4 Value
 //static uint8 simpleProfileChar4 = 0;
@@ -204,7 +204,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
     // Characteristic 1 Declaration
     { 
       { ATT_BT_UUID_SIZE, characterUUID },
-      GATT_PERMIT_READ, 
+      GATT_PERMIT_AUTHEN_READ,
       0,
       &simpleProfileChar1Props 
     },
@@ -212,7 +212,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
       // Characteristic Value 1
       { 
         { ATT_BT_UUID_SIZE, simpleProfilechar1UUID },
-        GATT_PERMIT_READ | GATT_PERMIT_WRITE, 
+        GATT_PERMIT_AUTHEN_READ | GATT_PERMIT_AUTHEN_WRITE,
         0, 
         simpleProfileChar1
       },
@@ -275,7 +275,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
     // Characteristic 4 Declaration
     { 
       { ATT_BT_UUID_SIZE, characterUUID },
-      GATT_PERMIT_READ, 
+      GATT_PERMIT_AUTHEN_READ,
       0,
       &simpleProfileChar4Props 
     },
@@ -291,7 +291,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
       // Characteristic 4 configuration
       { 
         { ATT_BT_UUID_SIZE, clientCharCfgUUID },
-        GATT_PERMIT_READ | GATT_PERMIT_WRITE, 
+        GATT_PERMIT_AUTHEN_READ | GATT_PERMIT_AUTHEN_WRITE,
         0, 
         (uint8 *)&simpleProfileChar4Config 
       },
@@ -315,7 +315,7 @@ static gattAttribute_t simpleProfileAttrTbl[SERVAPP_NUM_ATTR_SUPPORTED] =
       // Characteristic Value 5
       { 
         { ATT_BT_UUID_SIZE, simpleProfilechar5UUID },
-        GATT_PERMIT_AUTHEN_READ, 
+        GATT_PERMIT_READ,
         0, 
         simpleProfileChar5 
       },

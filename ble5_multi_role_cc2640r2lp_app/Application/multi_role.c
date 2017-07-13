@@ -88,7 +88,10 @@ Release Date: 2017-05-02 17:08:44
 * CONSTANTS
 */
 
+//#define GATEWAY
+
 //#define DEBUG_TSYNC   //Debug printfs for time syncing
+//#define DEBUG_PAIRING //Debug printfs for pairing
 
 // Maximum number of scan responses
 // this can only be set to 15 because that is the maximum
@@ -206,6 +209,8 @@ Release Date: 2017-05-02 17:08:44
 #define CONNECTION_COMPLETE                  Event_Id_20
 #define DISCONNECTED                         Event_Id_21
 #define TIMEOUT_WAIT_FOR_CONN                Event_Id_22
+#define OOB_PAIRING_COMPLETE                 Event_Id_23
+#define OOB_PAIRING_FAILED                   Event_Id_24
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -231,7 +236,9 @@ Release Date: 2017-05-02 17:08:44
                                              NOT_DISCOVERABLE        | \
                                              CONNECTION_COMPLETE     | \
                                              DISCONNECTED            | \
-                                             TIMEOUT_WAIT_FOR_CONN)
+                                             TIMEOUT_WAIT_FOR_CONN   | \
+                                             OOB_PAIRING_COMPLETE    | \
+                                             OOB_PAIRING_FAILED)
 
 // Discovery states
 typedef enum {
@@ -268,8 +275,16 @@ typedef enum {
 #define ROUTE_DIRECT_ADV_MAX_COUNT        1
 
 //Maximum interval for random route discovery
-#define ROUTE_DISC_WAIT_MAX_CNT          10
-#define ROUTE_DISC_WAIT_MIN_CNT          8
+#ifdef GATEWAY
+    #define ROUTE_DISC_WAIT_MAX_CNT          3
+    #define ROUTE_DISC_WAIT_MIN_CNT          1
+#else
+    #define ROUTE_DISC_WAIT_MAX_CNT          10
+    #define ROUTE_DISC_WAIT_MIN_CNT          8
+#endif
+
+//OOB key len
+#define OOB_KEY_LEN                    16
 /*********************************************************************
 * TYPEDEFS
 */
@@ -398,15 +413,29 @@ enum unsynced_slave_state_t{
   PASSIVE_ADV,
   DIRECT_ADV,
   CONNECTING,
-  CONNECTED
+  PAIRED
 };
 
-static enum global_state_t global_state = UNSYNCED_SLAVE;
-//static enum global_state_t global_state = TSYNCED_SCANNING;
+//static enum global_state_t global_state = UNSYNCED_SLAVE;
+#ifdef GATEWAY
+    static enum global_state_t global_state = TSYNCED_SCANNING;
+    static const uint8_t modified_addr[B_ADDR_LEN] = {0x2, 0x4, 0x8, 0x9, 0x0, 0xB};
+#else
+    static enum global_state_t global_state = UNSYNCED_SLAVE;
+    static const uint8_t modified_addr[B_ADDR_LEN] = {0x1, 0x4, 0x8, 0x9, 0x0, 0xB};
+#endif
+
 static enum unsynced_slave_state_t slave_state = INIT;
+static uint8_t OOB_key[OOB_KEY_LEN] = {0x2b,0x7e,0x15,0x16,
+                                       0x28,0xae,0xd2,0xa6,
+                                       0xab,0xf7,0x15,0x88,
+                                       0x09,0xcf,0x4f,0x3c};
 
 //Global clock for time syncronization
 static uint64_t my_global_time;
+
+//Current connection handle
+static uint16_t curr_conn_handle;
 
 //Route direct adv count
 static int route_direct_adv_count = 0;
@@ -675,6 +704,9 @@ static void multi_role_init(void)
   // Create an RTOS queue for message from profile to be sent to app.
   appMsgQueue = Util_constructQueue(&appMsg);
 
+  //Set bluetooth address here
+  HCI_EXT_SetBDADDRCmd(modified_addr);
+
   // Create one-shot clocks for internal periodic events.
   Util_constructClock(&periodicClock, global_time_clockHandler,
                       GLOBAL_TIME_CLOCK_PERIOD, GLOBAL_TIME_CLOCK_PERIOD, false, 0);
@@ -865,10 +897,13 @@ static void multi_role_init(void)
 
   // Setup the GAP Bond Manager
   {
+    uint8_t sc_mode = GAPBOND_SECURE_CONNECTION_NONE;
+    uint8_t oob_enabled = TRUE;
+
     uint8_t pairMode = GAPBOND_PAIRING_MODE_INITIATE;
     uint8_t mitm = TRUE;
-    uint8_t ioCap = GAPBOND_IO_CAP_DISPLAY_ONLY;
-    uint8_t bonding = TRUE;
+    uint8_t ioCap = GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT;
+    uint8_t bonding = FALSE;
 
     // Set pairing mode
     GAPBondMgr_SetParameter(GAPBOND_PAIRING_MODE, sizeof(uint8_t), &pairMode);
@@ -881,6 +916,17 @@ static void multi_role_init(void)
 
     // Sst bonding requirements
     GAPBondMgr_SetParameter(GAPBOND_BONDING_ENABLED, sizeof(uint8_t), &bonding);
+
+
+    //Set Secure connections (for now, change later when you understand)
+    GAPBondMgr_SetParameter(GAPBOND_SECURE_CONNECTION, sizeof(uint8_t), &sc_mode);
+
+    //Set OOB enable
+    GAPBondMgr_SetParameter(GAPBOND_OOB_ENABLED, sizeof(uint8_t), &oob_enabled);
+
+    //Set OOB data
+    GAPBondMgr_SetParameter(GAPBOND_OOB_DATA, KEYLEN, OOB_key);
+
 
     // Register and start Bond Manager
     VOID GAPBondMgr_Register(&multi_role_BondMgrCBs);
@@ -1010,13 +1056,34 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
 
         case TSYNCED_WAIT_FOR_TSYNC_CONN:
           if(events & CONNECTION_COMPLETE){
+#ifdef DEBUG_PAIRING
+            Display_print0(dispHandle, 16, 0, "Waiting to pair!");
+#endif
+          }else if(events & OOB_PAIRING_COMPLETE){
+#ifdef DEBUG_PAIRING
+              Display_print0(dispHandle, 16, 0, "Pairing complete!");
+#endif
+            //Start service discovery
+            multi_role_startDiscovery(curr_conn_handle);
+
             global_state = TSYNCED_MASTER;
+          }else if(events & OOB_PAIRING_FAILED){
+#ifdef DEBUG_PAIRING
+            Display_print0(dispHandle, 16, 0, "Pairing failed! Disconnect!");
+#endif
+            mr_doDisconnect(0);
+
+            //Reset info
+            memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
+            numTimeSyncRequests = 0;
+
+            global_state = TSYNCED_SCANNING;
           }
         break;
 
         case TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN:
          if(events & CONNECTION_COMPLETE){
-           Display_print0(dispHandle, 15,0 ,"I am also route connected!");
+           Display_print0(dispHandle, 15,0 ,"I am also route connected! Waiting to pair!");
          }else if(events & DISCONNECTED){
            Display_print0(dispHandle, 15,0 ,"Going back to previous state!");
            global_state = TSYNCED_SCANNING;
@@ -1757,10 +1824,9 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         // Return to main menu
         tbm_goTo(&mrMenuMain);
 
-        // Start service discovery if master
-        if(global_state == TSYNCED_WAIT_FOR_TSYNC_CONN){
-          multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
-        }else if(global_state == TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN){
+        curr_conn_handle = pEvent->linkCmpl.connectionHandle;
+
+        if(global_state == TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN){
           multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
         }else if(global_state == UNSYNCED_SLAVE){
           slave_state = CONNECTING;
@@ -2109,6 +2175,7 @@ static void multi_role_processGATTDiscEvent(gattMsgEvent_t *pMsg)
       {
         discInfo[connIndex].svcStartHdl = ATT_ATTR_HANDLE(pMsg->msg.findByTypeValueRsp.pHandlesInfo, 0);
         discInfo[connIndex].svcEndHdl = ATT_GRP_END_HANDLE(pMsg->msg.findByTypeValueRsp.pHandlesInfo, 0);
+
       }
 
       // If procedure is complete
@@ -2150,10 +2217,15 @@ static void multi_role_processGATTDiscEvent(gattMsgEvent_t *pMsg)
                                                        pMsg->msg.readByTypeRsp.pDataList[att_len*i + 1]);
         }
 
+        if(global_state == TSYNCED_MASTER){
+          Event_post(syncEvent, NOTIFY_ENABLE);
+        }
+
 #ifdef DEBUG_TSYNC
         Display_print0(dispHandle,6,0,"recieved all characteristics!");
 #endif
-        Event_post(syncEvent, NOTIFY_ENABLE);
+      }else{
+          Display_print0(dispHandle,6,0,"recieved nothing!");
       }
     }
   }
@@ -2270,10 +2342,12 @@ static void multi_role_processPairState(gapPairStateEvent_t* pairingEvent)
     if (pairingEvent->status == SUCCESS)
     {
       Display_print1(dispHandle, MR_ROW_SECURITY, 0,"connHandle %d paired", pairingEvent->connectionHandle);
+      Event_post(syncEvent, OOB_PAIRING_COMPLETE);
     }
     else
     {
       Display_print2(dispHandle, MR_ROW_SECURITY, 0, "pairing failed: %d", pairingEvent->connectionHandle, pairingEvent->status);
+      Event_post(syncEvent, OOB_PAIRING_FAILED);
     }
   }
   // If a bond has happened
@@ -2721,6 +2795,8 @@ static bool enable_notifs(uint8_t index)
 
         }
       }
+  }else{
+    Display_print0(dispHandle, 17, 0, "loda!");
   }
   return status;
 }
@@ -2793,8 +2869,10 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
     if (events & NOTIFY_ENABLE){
       //Write to enable configuration callback
       if(enable_notifs(0) == FAILURE){
+        Display_print0(dispHandle,17,0, "notifs error!");
         Event_post(syncEvent, NOTIFY_ENABLE);
       }else{
+          Display_print0(dispHandle,17,0, "notifs success!");
         //Send time to T1
         Event_post(syncEvent, WRITE_TO_SERVER);
        }
@@ -2929,12 +3007,31 @@ static void multi_role_processTimeSyncEvts(uint32_t events)
             mr_doAdvertise(0);
         }
         else if(events & NOT_DISCOVERABLE){
+#ifdef DEBUG_PAIRING
+          Display_print0(dispHandle, 15, 0, "Waiting to pair!");
+#endif
+        }else if(events & OOB_PAIRING_COMPLETE){
+#ifdef DEBUG_PAIRING
+          Display_print0(dispHandle, 15, 0, "Pairing complete!");
+#endif
           tsync_slave_state = WAIT_FOR_SYNC;
-          slave_state = CONNECTED;
+          slave_state = PAIRED;
+        }else if(events & OOB_PAIRING_FAILED){
+#ifdef DEBUG_PAIRING
+          Display_print0(dispHandle, 15, 0, "Pairing failed! Disconnect now!");
+#endif
+          mr_doDisconnect(0);
+
+          //Reset scanReqList
+          memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
+          numScanRequests = 0;
+
+          slave_state = INIT;
+          tsync_slave_state = WAIT_FOR_SYNC;
         }
       break;
 
-      case CONNECTED:
+      case PAIRED:
         if (events & NOT_DISCOVERABLE){
           //Turn off Red LED
           PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
@@ -3027,8 +3124,8 @@ static void add_to_timeSync_reqList(gapDeviceInfoEvent_t deviceInfo)
   numTimeSyncRequests++;
 
 #ifdef DEBUG_TSYNC
-  Display_print3(dispHandle, 21, 0, "Num time sync requests: %d, rssi: %d, count: %d",
-                 numTimeSyncRequests, deviceInfo.rssi, count++);
+  Display_print2(dispHandle, 21, 0, "Num time sync requests: %d, rssi: %d",
+                 numTimeSyncRequests, deviceInfo.rssi);
 #endif
 }
 
