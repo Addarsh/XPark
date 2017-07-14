@@ -195,8 +195,8 @@ Release Date: 2017-05-02 17:08:44
 #define MR_PERIODIC_EVT                      Event_Id_06
 #define NOTIFY_ENABLE                        Event_Id_07
 #define NOTIFY_CLIENT                        Event_Id_08
-#define WRITE_TO_SERVER                      Event_Id_09
-#define DELAY_RSP                            Event_Id_10
+#define WRITE_DATA                           Event_Id_09
+
 #define START_SCAN                           Event_Id_11
 #define TSYNC_COMPLETE_EVT                   Event_Id_12
 #define SCAN_REQ_TIMEOUT                     Event_Id_13
@@ -223,8 +223,7 @@ Release Date: 2017-05-02 17:08:44
                                              MR_PASSCODE_NEEDED_EVT  | \
                                              NOTIFY_ENABLE           | \
                                              NOTIFY_CLIENT           | \
-                                             WRITE_TO_SERVER         | \
-                                             DELAY_RSP               | \
+                                             WRITE_DATA              | \
                                              START_SCAN              | \
                                              TSYNC_COMPLETE_EVT      | \
                                              SCAN_REQ_TIMEOUT        | \
@@ -285,6 +284,9 @@ typedef enum {
 
 //OOB key len
 #define OOB_KEY_LEN                    16
+
+//Invalid BLE connection handle
+#define INVALID_CONN_HANDLE            UINT16_MAX
 /*********************************************************************
 * TYPEDEFS
 */
@@ -416,6 +418,16 @@ enum unsynced_slave_state_t{
   PAIRED
 };
 
+//Time synced master (TSM) states
+enum tsynced_master_t{
+  TSM_INVALID,
+  TSM_CONNECTING,
+  TSM_PAIRED,
+  TSM_CC_ENABLED,
+  TSM_T1_SENT,
+  TSM_DELAY_RSP_SENT
+};
+
 //static enum global_state_t global_state = UNSYNCED_SLAVE;
 #ifdef GATEWAY
     static enum global_state_t global_state = TSYNCED_SCANNING;
@@ -426,6 +438,8 @@ enum unsynced_slave_state_t{
 #endif
 
 static enum unsynced_slave_state_t slave_state = INIT;
+static enum tsynced_master_t tsm_state = TSM_INVALID;
+
 static uint8_t OOB_key[OOB_KEY_LEN] = {0x2b,0x7e,0x15,0x16,
                                        0x28,0xae,0xd2,0xa6,
                                        0xab,0xf7,0x15,0x88,
@@ -435,7 +449,7 @@ static uint8_t OOB_key[OOB_KEY_LEN] = {0x2b,0x7e,0x15,0x16,
 static uint64_t my_global_time;
 
 //Current connection handle
-static uint16_t curr_conn_handle;
+static uint16_t curr_conn_handle = INVALID_CONN_HANDLE;
 
 //Route direct adv count
 static int route_direct_adv_count = 0;
@@ -615,6 +629,13 @@ static bool enable_notifs(uint8_t index);
 static uint64_t get_my_global_time(void);
 static bool write_to_server(uint8_t index, uint64_t time);
 static void perform_time_sync(void);
+
+//TSM related functions
+static void enter_tsm_master(void);
+static void exit_tsm_master(enum  global_state_t next_state);
+static void tsm_write_data(uint64_t T, enum tsynced_master_t new_state);
+static void tsm_processEvts(uint32_t events);
+
 static void multi_role_processTimeSyncEvts(uint32_t events);
 static void addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport);
 static uint8_t *find_target_addr(void);
@@ -1054,31 +1075,8 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
           }
         break;
 
-        case TSYNCED_WAIT_FOR_TSYNC_CONN:
-          if(events & CONNECTION_COMPLETE){
-#ifdef DEBUG_PAIRING
-            Display_print0(dispHandle, 16, 0, "Waiting to pair!");
-#endif
-          }else if(events & OOB_PAIRING_COMPLETE){
-#ifdef DEBUG_PAIRING
-              Display_print0(dispHandle, 16, 0, "Pairing complete!");
-#endif
-            //Start service discovery
-            multi_role_startDiscovery(curr_conn_handle);
-
-            global_state = TSYNCED_MASTER;
-          }else if(events & OOB_PAIRING_FAILED){
-#ifdef DEBUG_PAIRING
-            Display_print0(dispHandle, 16, 0, "Pairing failed! Disconnect!");
-#endif
-            mr_doDisconnect(0);
-
-            //Reset info
-            memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
-            numTimeSyncRequests = 0;
-
-            global_state = TSYNCED_SCANNING;
-          }
+        case TSYNCED_MASTER:
+            tsm_processEvts(events);
         break;
 
         case TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN:
@@ -1238,7 +1236,6 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
 
         break;
 
-        case TSYNCED_MASTER:
         case UNSYNCED_SLAVE:
             multi_role_processTimeSyncEvts(events);
         break;
@@ -1401,7 +1398,8 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
 #ifdef DEBUG_TSYNC
     Display_print1(dispHandle, 12, 0, "T2: %u", T2);
 #endif
-    Event_post(syncEvent, DELAY_RSP);
+
+    Event_post(syncEvent, WRITE_DATA);
   }
 
   // Messages from GATT server
@@ -1719,7 +1717,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
 
         if(is_dirConnAddr_req(pEvent->deviceInfo.pEvtData, DIRECT_ADV_CONN)){
-          global_state = TSYNCED_WAIT_FOR_TSYNC_CONN;
+          enter_tsm_master();
         }else{
           global_state = TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN;
         }
@@ -2861,62 +2859,134 @@ static void perform_time_sync(void)
   Swi_restore(key);
 }
 
+//Data written by master to slave in time sync
+static void tsm_write_data(uint64_t T, enum tsynced_master_t new_state)
+{
+  if(write_to_server(0,T) == FAILURE)
+  {
+ #ifdef DEBUG_TSYNC
+    Display_print0(dispHandle,15,0,"Error! Write to server failed!");
+ #endif
+    Event_post(syncEvent, WRITE_DATA);
+  }
+  else
+  {
+    tsm_state = new_state;
+  }
+}
+
+//Entry into the TSM Master state
+static void enter_tsm_master(void)
+{
+  global_state = TSYNCED_MASTER;
+  tsm_state = TSM_CONNECTING;
+}
+
+//Reset info and exit to another state
+static void exit_tsm_master(enum  global_state_t next_state)
+{
+  //Reset time sync req list
+  memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
+  numTimeSyncRequests = 0;
+
+  //Reset connection handler
+  curr_conn_handle = INVALID_CONN_HANDLE;
+
+  //Go to next state
+  global_state = next_state;
+  tsm_state = TSM_INVALID;
+}
+
+//Handle Master events related to time synchronization
+static void tsm_processEvts(uint32_t events)
+{
+  switch (tsm_state){
+
+    case TSM_CONNECTING:
+      if(events & CONNECTION_COMPLETE)
+      {
+        //Nothing for now, but add a timeout clock later
+      }
+      else if(events & OOB_PAIRING_COMPLETE)
+      {
+    #ifdef DEBUG_PAIRING
+        Display_print0(dispHandle, 16, 0, "Pairing complete!");
+    #endif
+        //Start service discovery
+        multi_role_startDiscovery(curr_conn_handle);
+
+        tsm_state = TSM_PAIRED;
+      }
+      else if(events & OOB_PAIRING_FAILED)
+      {
+    #ifdef DEBUG_PAIRING
+        Display_print0(dispHandle, 16, 0, "Pairing failed! Disconnect!");
+    #endif
+        //Disconnect
+        mr_doDisconnect(0);
+
+        //Exit state
+        exit_tsm_master(TSYNCED_SCANNING);
+      }
+    break;
+
+    case TSM_PAIRED:
+      if (events & NOTIFY_ENABLE)
+      {
+        //Enable CC in client
+        if(enable_notifs(0) == FAILURE)
+        {
+          Event_post(syncEvent, NOTIFY_ENABLE);
+        }
+        else
+        {
+          tsm_state = TSM_CC_ENABLED;
+          Event_post(syncEvent, WRITE_DATA);
+        }
+      }
+    break;
+
+    case TSM_CC_ENABLED:
+      if(events & WRITE_DATA)
+      {
+        //Notify the client, call SetParameter
+        T1 = get_my_global_time();
+        tsm_write_data(T1, TSM_T1_SENT);
+     }
+    break;
+
+    case TSM_T1_SENT:
+      if(events & WRITE_DATA)
+      {
+        //Construct delay response message
+        T2_prime = get_my_global_time();
+        tsm_write_data(T2_prime, TSM_DELAY_RSP_SENT);
+      }
+    break;
+
+    case TSM_DELAY_RSP_SENT:
+      if(events & TSYNC_COMPLETE_EVT)
+      {
+        //If the no links exist, initiate route discovery
+        if(next_hop_node.valid == INVALID_NODE_INFO)
+        {
+          Util_startClock(&routeDiscClock);
+        }
+
+        exit_tsm_master(TSYNCED_SCANNING);
+     }
+     break;
+
+    default:
+    break;
+  }
+}
+
+
 //Handle all time synchronization events here
 static void multi_role_processTimeSyncEvts(uint32_t events)
 {
-  if(global_state == TSYNCED_MASTER){
-
-    if (events & NOTIFY_ENABLE){
-      //Write to enable configuration callback
-      if(enable_notifs(0) == FAILURE){
-        Display_print0(dispHandle,17,0, "notifs error!");
-        Event_post(syncEvent, NOTIFY_ENABLE);
-      }else{
-          Display_print0(dispHandle,17,0, "notifs success!");
-        //Send time to T1
-        Event_post(syncEvent, WRITE_TO_SERVER);
-       }
-     }
-    else if(events & WRITE_TO_SERVER){
-       //Notify the client, call SetParameter
-       T1 = get_my_global_time();
-       if(write_to_server(0,T1) == FAILURE){
-#ifdef DEBUG_TSYNC
-         Display_print0(dispHandle,15,0,"Error! Write to server failed!");
-#endif
-         Event_post(syncEvent, WRITE_TO_SERVER);
-       }else{
-#ifdef DEBUG_TSYNC
-         Display_print0(dispHandle,15,0,"Success! Wrote to server!");
-#endif
-       }
-     }
-    else if(events & DELAY_RSP){
-      //This is the delay response message
-      T2_prime = get_my_global_time();
-      if(write_to_server(0,T2_prime) == FAILURE){
-        Display_print0(dispHandle,15,0,"Error! Write to server failed!");
-        Event_post(syncEvent, WRITE_TO_SERVER);
-      }else{
-#ifdef DEBUG_TSYNC
-        Display_print0(dispHandle,15,0,"Success! Wrote to server!");
-#endif
-      }
-    }
-    else if(events & TSYNC_COMPLETE_EVT){
-      //Reset time sync req list
-      memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
-      numTimeSyncRequests = 0;
-
-      //If the no links exist, initiate route discovery
-      if(next_hop_node.valid == INVALID_NODE_INFO)
-        Util_startClock(&routeDiscClock);
-
-      //Tsync is complete and host has been disconnected
-      global_state = TSYNCED_SCANNING;
-    }
-  }
-  else if(global_state == UNSYNCED_SLAVE){
+    if(global_state == UNSYNCED_SLAVE){
     uint8_t advType;
     switch(slave_state){
       case INIT:
