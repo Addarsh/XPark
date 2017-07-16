@@ -3,8 +3,8 @@
  *                step by the lib_search utility
  */
 
-"C:\ti\simplelink_cc2640r2_sdk_1_35_00_33\source\ti\ble5stack\blelib\ctrl\cc2640_hci_pcxx.a"
-"C:\ti\simplelink_cc2640r2_sdk_1_35_00_33\source\ti\ble5stack\blelib\ctrl\cc2640_ll_pcxx.a"
+"C:\ti\simplelink_cc2640r2_sdk_1_35_00_33\source\ti\ble5stack\blelib\ctrl\cc2640_hci_pcxx_lr.a"
+"C:\ti\simplelink_cc2640r2_sdk_1_35_00_33\source\ti\ble5stack\blelib\ctrl\cc2640_ll_pcxx_lr.a"
 "C:\ti\simplelink_cc2640r2_sdk_1_35_00_33\source\ti\ble5stack\blelib\hci_tl\cc26xx_hci_tl_none.a"
 "C:\ti\simplelink_cc2640r2_sdk_1_35_00_33\source\ti\ble5stack\blelib\host\cc26xx_att_pcxx.a"
 "C:\ti\simplelink_cc2640r2_sdk_1_35_00_33\source\ti\ble5stack\blelib\host\cc26xx_gap_pcxx.a"

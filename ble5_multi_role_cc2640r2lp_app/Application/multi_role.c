@@ -89,7 +89,12 @@ Release Date: 2017-05-02 17:08:44
 */
 
 //#define GATEWAY
-#define DEV_NUM 1
+
+#ifdef GATEWAY
+  #define DEV_NUM 1
+#else
+  #define DEV_NUM 3
+#endif
 
 //#define DEBUG_TSYNC   //Debug printfs for time syncing
 //#define DEBUG_PAIRING //Debug printfs for pairing
@@ -115,15 +120,17 @@ Release Date: 2017-05-02 17:08:44
 #define DEFAULT_SVC_DISCOVERY_DELAY           1000
 
 // Scan parameters
-#define DEFAULT_SCAN_DURATION                 2000
+#define SCAN_MODULO                           4000 //change: 4/6 s
+#define DEFAULT_SCAN_DURATION                 2000 //change: 2/4s
+#define SCAN_REQ_DELAY_PERIOD                 2000 // change:2/4s to wait for scan responses
 #define DEFAULT_SCAN_WIND                     80
-#define DEFAULT_SCAN_INT                      80
+#define DEFAULT_SCAN_INT                      160
 
 //Maximum number of scan requests possible
 #define DEFAULT_MAX_SCAN_REQ                  10
 
 //Maximum number of Time sync requests possible
-#define DEFAULT_MAX_TSYNC_REQ                  10
+#define DEFAULT_MAX_TSYNC_REQ                 10
 
 // Discovey mode (limited, general, all)
 #define DEFAULT_DISCOVERY_MODE                DEVDISC_MODE_ALL
@@ -141,8 +148,8 @@ Release Date: 2017-05-02 17:08:44
 #define DEFAULT_LINK_WHITE_LIST               FALSE
 
 //Manufactuer ID for advertising data
-#define MY_MANUFACTURER_ID_1                    0x1633
-#define MY_MANUFACTURER_ID_2                    0x1634
+#define MY_MANUFACTURER_ID_1                  0x1633
+#define MY_MANUFACTURER_ID_2                  0x1634
 
 //Time sync start message in advert data
 #define DEFFAULT_NO_MESSAGE                    0xFF
@@ -264,7 +271,6 @@ typedef enum {
 
 // How often to perform periodic event (in msec)
 #define GLOBAL_TIME_CLOCK_PERIOD               1  //1ms clock time
-#define SCAN_REQ_DELAY_PERIOD                2000 //2s to wait for scan responses
 #define DIR_ADV_PERIOD                       4000 //5s wait time for dir advertising
 #define ROUTE_DISC_DELAY                     10000 // 10s wait time for route discovery
 #define WAIT_FOR_CONN_DURATION               6000 //6s to wait to connect
@@ -286,7 +292,7 @@ typedef enum {
 #endif
 
 //OOB key len
-#define OOB_KEY_LEN                    16
+#define OOB_KEY_LEN                         16
 
 //Alternate names for RED and GREEN leds
 #define RED Board_RLED
@@ -294,6 +300,9 @@ typedef enum {
 
 //Invalid BLE connection handle
 #define INVALID_CONN_HANDLE            UINT16_MAX
+
+//Family Filter length is 5 bytes
+#define FAMILY_FILTER_LEN                   5
 /*********************************************************************
 * TYPEDEFS
 */
@@ -439,17 +448,14 @@ enum usyncadv_t{
   USYNCADV_CONNECTING
 };
 
-//static enum global_state_t global_state = UNSYNCED_SLAVE;
-#ifdef GATEWAY
-    static const uint8_t modified_addr[B_ADDR_LEN] = {0x2, 0x4, 0x8, 0x9, 0x0, 0xB};
-#else
-    static const uint8_t modified_addr[B_ADDR_LEN] = {DEV_NUM, 0x4, 0x8, 0x9, 0x0, 0xB};
-#endif
+static const uint8_t modified_addr[B_ADDR_LEN] = {DEV_NUM, 0x4, 0x8, 0x9, 0x0, 0xB};
 
 static uint8_t OOB_key[OOB_KEY_LEN] = {0x2b,0x7e,0x15,0x16,
                                        0x28,0xae,0xd2,0xa6,
                                        0xab,0xf7,0x15,0x88,
                                        0x09,0xcf,0x4f,0x3c};
+static uint8_t family_filter[FAMILY_FILTER_LEN] = {0x4, 0x8, 0x9, 0x0, 0xB};
+
 //Global state var
 static int global_state;
 
@@ -657,15 +663,18 @@ static void tsm_processEvts(uint32_t events);
 //USYNCADV related functions
 static void usyncadv_entry_func(void *sub_state);
 static void usyncadv_exit_func(void);
+static void save_next_hop_info(uint8_t *addr);
 static void usyncadv_processEvts(uint32_t events);
 
 //USYNCSLAVE related functions
 static void usyncslave_entry_func(void *sub_state);
 static void usyncslave_exit_func(void);
+static void erase_next_hop_info(void);
 static void usyncslave_processEvts(uint32_t events);
 
 static void addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport);
-static uint8_t *find_target_addr(void);
+static uint8_t is_family(uint8_t *addr);
+static uint8_t *find_target_addr(int8_t *rssi);
 static bool connect(uint8_t addrType, uint8_t* addr);
 static bool is_timeSync_req(uint8_t * advData);
 static bool is_dirConnAddr_req(uint8_t * advData, int  msg);
@@ -790,6 +799,9 @@ static void multi_role_init(void)
 
   // Init two button menu
   tbm_initTwoBtnMenu(dispHandle, &mrMenuMain, 1, NULL);
+
+  //Tx power to 2 dbm
+  HCI_EXT_SetTxPowerCmd(HCI_EXT_TX_POWER_4_DBM);
 
   // Setup the GAP
   {
@@ -1125,7 +1137,7 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
 
         case TSYNCED_ROUTE_CONNECTING:
           if(events & START_SCAN){
-            uint8_t * target_addr = find_target_addr();
+            uint8_t * target_addr = find_target_addr(&next_hop_node.rssi);
             if(target_addr == NULL){
 
               route_direct_adv_count++;
@@ -1334,6 +1346,8 @@ static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg)
               if (scanRequestReport->BLEEventCode == HCI_BLE_SCAN_REQ_REPORT_EVENT)
               {
                 //Add device to info list
+                static int count = 0;
+                Display_print1(dispHandle, 14, 0, "sca req count: %d", ++count);
                 addToScanReqReceivedList(scanRequestReport);
               }
             }
@@ -1729,10 +1743,10 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       else if((pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_IND)
                             && is_dirConnAddr_req(pEvent->deviceInfo.pEvtData, ROUTE_DISC))
       {
-          if(save_scan_device_info(pEvent->deviceInfo.addrType, pEvent->deviceInfo.addr) == SUCCESS)
-            global_state = TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN;
+        if(save_scan_device_info(pEvent->deviceInfo.addrType, pEvent->deviceInfo.addr) == SUCCESS)
+          global_state = TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN;
       }
-      else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_SCAN_IND &&
+      else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_IND  &&
               is_timeSync_req(pEvent->deviceInfo.pEvtData))
       {
         add_to_timeSync_reqList(pEvent->deviceInfo);
@@ -1809,7 +1823,6 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         // Add index-to-connHandle mapping entry and update menus
         uint8_t index = multi_role_addMappingEntry(pEvent->linkCmpl.connectionHandle, pEvent->linkCmpl.devAddr);
 
-
         //turn off advertising if no available links
         if (linkDB_NumActive() >= maxNumBleConns)
         {
@@ -1825,6 +1838,10 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         tbm_goTo(&mrMenuMain);
 
         curr_conn_handle = pEvent->linkCmpl.connectionHandle;
+        if(global_state == USYNCED_ADV)
+        {
+          save_next_hop_info(pEvent->linkCmpl.devAddr);
+        }
 
         if(global_state == TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN)
         {
@@ -2365,7 +2382,7 @@ static void global_time_clockHandler(UArg arg)
 {
   //Increment global time
   my_global_time++;
-  if(my_global_time % 4000 == 0){
+  if(my_global_time % SCAN_MODULO == 0){
     Event_post(syncEvent, START_SCAN);
   }
 }
@@ -2980,7 +2997,7 @@ static int save_scan_device_info(uint8_t addrType, uint8_t *addr)
 
   //Save peer device details
   curr_peer_addr_type = addrType;
-  memcpy(curr_peer_addr, addr,B_ADDR_LEN);
+  memcpy(curr_peer_addr, addr, B_ADDR_LEN);
 
   return SUCCESS;
 }
@@ -3153,7 +3170,7 @@ static void tsm_processEvts(uint32_t events)
         //If the no links exist, initiate route discovery
         if(next_hop_node.valid == INVALID_NODE_INFO)
         {
-          Util_startClock(&routeDiscClock);
+          //Util_startClock(&routeDiscClock);
         }
 
         //Exit state
@@ -3172,20 +3189,34 @@ static void usyncadv_entry_func(void *sub_state)
 {
   *(enum usyncadv_t *)(sub_state) = USYNCADV_PASSIVE;
 
+  //Reset scanReqList
+  memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
+  numScanRequests = 0;
+
   //Set advertising type to scannable, non-connectable indirect advertising
-  if(set_and_start_advertising(GAP_ADTYPE_ADV_SCAN_IND,
-                               TIME_SYNC_START, NULL) == FAILURE)
+  //if(set_and_start_advertising(GAP_ADTYPE_ADV_SCAN_IND,
+  //                             TIME_SYNC_START, NULL) == FAILURE)
+   // return;
+  if(set_and_start_advertising(GAP_ADTYPE_ADV_IND,
+                                 TIME_SYNC_START, NULL) == FAILURE)
     return;
 
   turn_on_led(RED);
 }
 
+//Save node information of current peer as next hop node
+static void save_next_hop_info(uint8_t *addr)
+{
+  memcpy(next_hop_node.addr, addr, B_ADDR_LEN);
+  next_hop_node.valid = VALID_NODE_INFO;
+
+  Display_print2(dispHandle, 16, 0, "Next hop addr: %s, rssi: %d",
+                 (const char*)Util_convertBdAddr2Str(next_hop_node.addr),
+                 next_hop_node.rssi);
+}
+
 static void usyncadv_exit_func(void)
 {
-  //Reset scanReqList
-  memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
-  numScanRequests = 0;
-
   stop_advertising();
 
   //Next state is USYNC_SLAVE
@@ -3211,6 +3242,7 @@ static void usyncadv_processEvts(uint32_t events)
         Display_print0(dispHandle, 15, 0, "starting passive clock!");
       #endif
         //Start clock for passive advertising
+        if(DEV_NUM != 2)
         Util_startClock(&passiveAdvertClock);
       }
       else if(events & SCAN_REQ_TIMEOUT)
@@ -3218,7 +3250,8 @@ static void usyncadv_processEvts(uint32_t events)
         if(stop_advertising() == FAILURE)
           return;
 
-      }else if(events & NOT_DISCOVERABLE)
+      }
+      else if(events & NOT_DISCOVERABLE)
       {
         usyncadv_state = USYNCADV_DIRECT;
         Event_post(syncEvent, START_DIR_ADV);
@@ -3228,7 +3261,7 @@ static void usyncadv_processEvts(uint32_t events)
     case USYNCADV_DIRECT:
       if(events & START_DIR_ADV)
       {
-        uint8_t *target_addr = find_target_addr();
+        uint8_t *target_addr = find_target_addr(&next_hop_node.rssi);
 
         if(target_addr == NULL)
         {
@@ -3284,6 +3317,14 @@ static void usyncslave_entry_func(void *sub_state)
   *(enum usyncslave_t *)sub_state = USYNCSLAVE_PAIRING;
 }
 
+//Delete next node information
+static void erase_next_hop_info(void)
+{
+  memset(next_hop_node.addr, 0, 0);
+  next_hop_node.rssi = 0;
+  next_hop_node.valid = INVALID_NODE_INFO;
+}
+
 static void usyncslave_exit_func(void)
 {
   mr_doDisconnect(0);
@@ -3294,6 +3335,8 @@ static void usyncslave_exit_func(void)
 
   enter_state(TSYNCED_SCANNING);
 }
+
+//Delete saved hop info
 
 //Handle Slave events related to time synchronization
 static void usyncslave_processEvts(uint32_t events)
@@ -3310,6 +3353,8 @@ static void usyncslave_processEvts(uint32_t events)
       else if(events & OOB_PAIRING_FAILED)
       {
         Display_print0(dispHandle, 15, 0, "Pairing failed! Disconnect now!");
+
+        erase_next_hop_info();
 
         exit_func();
       }
@@ -3353,8 +3398,8 @@ static void usyncslave_processEvts(uint32_t events)
         exit_func();
 
         //If the no links exist, initiate route discovery
-        if(next_hop_node.valid == INVALID_NODE_INFO)
-          Util_startClock(&routeDiscClock);
+        //if(next_hop_node.valid == INVALID_NODE_INFO)
+          //Util_startClock(&routeDiscClock);
       }
     break;
   }
@@ -3388,6 +3433,9 @@ static void addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestRepor
   scanReqList[numScanRequests].addrType = scanRequestReport->peerAddrType;
   numScanRequests++;
 
+  static int count = 17;
+  Display_print2(dispHandle, count++, 0,"scan req addr: %s, rssi: %d",
+                 (const char*)Util_convertBdAddr2Str(peerAddr), scanRequestReport->rssi);
 #ifdef DEBUG_TSYNC
   Display_print2(dispHandle, 21, 0, "Num scan requests: %d, rssi: %d",
                                    numScanRequests, scanRequestReport->rssi);
@@ -3426,22 +3474,35 @@ static void add_to_timeSync_reqList(gapDeviceInfoEvent_t deviceInfo)
 #endif
 }
 
-//Find the target address to direct advertise to
-//Currently the algorithm for this is maximum rssi
-static uint8_t *find_target_addr(void)
+//Check if peer node is part of family
+static uint8_t is_family(uint8_t *addr)
+{
+  if(memcmp(family_filter, &addr[1], FAMILY_FILTER_LEN) == 0)
+    return TRUE;
+
+  return FALSE;
+}
+
+//Find the target address to direct advertise
+static uint8_t *find_target_addr(int8_t *rssi)
 {
   if(numScanRequests < 1)
     return NULL;
 
-  int8_t max_rssi = scanReqList[0].rssi;
-  uint8_t *target_addr = scanReqList[0].addr;
-  for(int i = 1; i < numScanRequests; i++){
-    if(scanReqList[i].rssi > max_rssi){
-      max_rssi = scanReqList[i].rssi;
+  uint8_t *target_addr = NULL;
+  int8_t min_rssi = 0;
+
+  static int num = 18;
+  for(int i = 0; i < numScanRequests; i++){
+   // Display_print2(dispHandle, num++, 0, "min_rssi: %d, addr: %s",
+   //                scanReqList[i].rssi, (const char*)Util_convertBdAddr2Str(scanReqList[i].addr) );
+    if(is_family(scanReqList[i].addr) && scanReqList[i].rssi < min_rssi){
+      min_rssi = scanReqList[i].rssi;
       target_addr = scanReqList[i].addr;
     }
   }
 
+  *rssi = min_rssi;
   return target_addr;
 }
 

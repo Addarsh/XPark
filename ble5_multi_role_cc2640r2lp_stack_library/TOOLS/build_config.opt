@@ -148,7 +148,7 @@
 /* BLE v5.0 Features
  * Note: The Long Range feature is for evaluation only.
  */
-/* -DV50_FEATURES=PHY_LR_CFG */
+ -DV50_FEATURES=PHY_LR_CFG
 
 /* Include Transport Layer (Full or PTM) */
 -DHCI_TL_NONE
