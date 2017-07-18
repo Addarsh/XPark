@@ -159,7 +159,6 @@ Release Date: 2017-05-02 17:08:44
 #define DEFFAULT_NO_MESSAGE                    0xFF
 #define TIME_SYNC_START                        42
 #define DIRECT_ADV_CONN                        43
-#define ROUTE_DISC                             44
 
 //Index for advert data positions
 #define MSG_TYPE_POS                           11
@@ -213,7 +212,7 @@ Release Date: 2017-05-02 17:08:44
 #define SCAN_REQ_TIMEOUT                     Event_Id_13
 #define DIR_ADV_TIMEOUT                      Event_Id_14
 #define START_DIR_ADV                        Event_Id_15
-
+#define STATUS_CHANGE                        Event_Id_16
 #define END_ROUTE_SCAN                       Event_Id_17
 #define DISCOVERABLE_NOW                     Event_Id_18
 #define NOT_DISCOVERABLE                     Event_Id_19
@@ -243,6 +242,7 @@ Release Date: 2017-05-02 17:08:44
                                              SCAN_REQ_TIMEOUT        | \
                                              DIR_ADV_TIMEOUT         | \
                                              START_DIR_ADV           | \
+                                             STATUS_CHANGE           | \
                                              END_ROUTE_SCAN          | \
                                              DISCOVERABLE_NOW        | \
                                              NOT_DISCOVERABLE        | \
@@ -423,11 +423,7 @@ enum global_state_t{
   TSYNCED_MASTER,
   USYNCED_ADV,
   USYNCED_SLAVE,
-  TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN,
-  TSYNCED_ROUTE_DISCOVERY,
-  TSYNCED_ROUTE_CONNECTING,
-  WAIITNG_FOR_ROUTE_CONNECT,
-  TSYNCED_ROUTE_CONNECTED,
+  TSYNCED_STATUS_CHANGE,
   TSYNCED_ADVERTISING
 };
 
@@ -478,12 +474,6 @@ static uint64_t my_global_time;
 static uint16_t curr_conn_handle = INVALID_CONN_HANDLE;
 static uint8_t curr_peer_addr_type;
 static uint8_t curr_peer_addr[B_ADDR_LEN];
-
-//Route direct adv count
-static int route_direct_adv_count = 0;
-
-//Current wait count for route disc
-static int route_disc_curr_wait_cnt = 0;
 
 //Time variables used for synchronization of slave
 static int64_t T1;
@@ -665,6 +655,11 @@ static void tscan_processEvts(uint32_t events);
 
 //TSLEEP related functions
 static void tsleep_processEvts(uint32_t events);
+
+//TCHANGE relayed functions
+static void tchange_entry_func(void *sub_state);
+static void tchange_exit_func(void);
+static void tchange_processEvts(uint32_t events);
 
 //TSM related functions
 static void tsm_entry_func(void *sub_state);
@@ -1095,14 +1090,8 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
       }
 
       if(events & START_SCAN){
-          Display_print1(dispHandle,12,0,"p: %d", my_global_time);
-          if(route_disc_curr_wait_cnt > 0){
-            route_disc_curr_wait_cnt--;
-            if(route_disc_curr_wait_cnt == 0){
-              global_state = TSYNCED_ROUTE_DISCOVERY;
-              route_disc_curr_wait_cnt = 0;
-            }
-          }
+        uint64_t my_time = get_my_global_time();
+        Display_print1(dispHandle,12,0,"p: %d", my_time);
       }
 
        //Manage global application states here
@@ -1113,6 +1102,10 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
 
         case TSYNCED_SLEEPING:
           tsleep_processEvts(events);
+        break;
+
+        case TSYNCED_STATUS_CHANGE:
+          tchange_processEvts(events);
         break;
 
         case USYNCED_ADV:
@@ -1127,161 +1120,10 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
           tsm_processEvts(events);
         break;
 
-        case TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN:
-         if(events & CONNECTION_COMPLETE){
-           Display_print0(dispHandle, 15,0 ,"I am also route connected! Waiting to pair!");
-         }else if(events & DISCONNECTED){
-           Display_print0(dispHandle, 15,0 ,"Going back to previous state!");
-           global_state = TSYNCED_SCANNING;
-         }
-         break;
-
-        case TSYNCED_ROUTE_DISCOVERY:
-          if(events & START_SCAN){
-            //Turn on advertising
-            mr_doAdvertise(0);
-          }else if(events & DISCOVERABLE_NOW){
-            //Start discovery wait clock
-            Util_startClock(&routeScanClock);
-
-            Display_print0(dispHandle, 15,0 ,"Started route discovery non connectable adv!");
-          }else if(events & END_ROUTE_SCAN){
-            //Turn off advertising
-            mr_doAdvertise(0);
-          }else if(events & NOT_DISCOVERABLE){
-
-            global_state = TSYNCED_ROUTE_CONNECTING;
-          }
-        break;
-
-        case TSYNCED_ROUTE_CONNECTING:
-          if(events & START_SCAN){
-            uint8_t * target_addr = find_target_addr(&next_hop_node.rssi);
-            if(target_addr == NULL){
-
-              route_direct_adv_count++;
-              Display_print0(dispHandle, 15,0 ,"No target addr found! Go back!");
-
-              if(route_direct_adv_count == ROUTE_DIRECT_ADV_MAX_COUNT){
-                //Reset all info
-                memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
-                numScanRequests = 0;
-
-                global_state = TSYNCED_SCANNING;
-                route_direct_adv_count = 0;
-                Display_print0(dispHandle, 15,0 ,"Route busy, try again later!");
-
-                //Set random time to get back to discovery
-                uint32_t rand_num = HalTRNG_GetTRNG();
-                route_disc_curr_wait_cnt = rand_num % (ROUTE_DISC_WAIT_MAX_CNT + 1 - ROUTE_DISC_WAIT_MIN_CNT)
-                                              + ROUTE_DISC_WAIT_MIN_CNT;
-                Display_print1(dispHandle, 16, 0, "Random wait count: %d", route_disc_curr_wait_cnt);
-              }else{
-                global_state = TSYNCED_ROUTE_DISCOVERY;
-              }
-
-            }else{
-              if(curr_peer_addr[0]== 0)
-                memcpy(curr_peer_addr, target_addr, B_ADDR_LEN);
-
-              //Change to connectable indirected advertising
-              uint8_t advType = GAP_ADTYPE_ADV_IND;
-              GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
-
-              //Change advertising parameters
-              advertData[MSG_TYPE_POS] = ROUTE_DISC;
-              VOID memcpy(&advertData[ADDR_POS], target_addr, B_ADDR_LEN);
-              GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
-
-              mr_doAdvertise(0);
-
-              Display_print1(dispHandle, 15,0 ,"Route direct adv to: %s",
-                           (const char*)Util_convertBdAddr2Str(target_addr));
-            }
-          }
-          else if(events & DISCOVERABLE_NOW){
-            //Start discovery wait clock
-            Util_startClock(&waitForConnClock);
-
-            PIN_setOutputValue(ledPinHandle, Board_RLED, 1);
-
-            global_state = WAIITNG_FOR_ROUTE_CONNECT;
-          }
-        break;
-
-        case WAIITNG_FOR_ROUTE_CONNECT:
-          if(events & TIMEOUT_WAIT_FOR_CONN){
-            //stop advertising, try again
-            mr_doAdvertise(0);
-          }
-          else if(events & NOT_DISCOVERABLE){
-            PIN_setOutputValue(ledPinHandle, Board_RLED, 0);
-
-            Display_print0(dispHandle, 15,0 ,"Route direct adv timed out!");
-
-            //Reset all info
-            memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
-            numScanRequests = 0;
-            memset(curr_peer_addr, 0, B_ADDR_LEN);
-
-            //Reset advertising data
-            uint8_t advType = GAP_ADTYPE_ADV_SCAN_IND;
-            GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
-
-            //Set advertising to time-sync
-            advertData[MSG_TYPE_POS] = DEFFAULT_NO_MESSAGE;
-            GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
-
-            global_state = TSYNCED_ROUTE_DISCOVERY;
-          }
-          else if(events & CONNECTION_COMPLETE){
-            global_state = TSYNCED_ROUTE_CONNECTED;
-
-            Event_post(syncEvent, CONNECTION_COMPLETE);
-
-          }
-        break;
-
-        case TSYNCED_ROUTE_CONNECTED:
-          if(events & CONNECTION_COMPLETE){
-            //Stop advertising
-            mr_doAdvertise(0);
-
-            //Save this as next hop address
-            next_hop_node.valid = VALID_NODE_INFO;
-            VOID memcpy(next_hop_node.addr, curr_peer_addr, B_ADDR_LEN);
-
-            Display_print0(dispHandle, 15,0, "Connected to route!");
-
-            //Green LED to indicate route has been established
-            PIN_setOutputValue(ledPinHandle, Board_GLED, 1);
-
-            //Disconnect now
-            mr_doDisconnect(0);
-          }
-          else if(events & DISCONNECTED){
-            Display_print1(dispHandle, 15,0, "Route discovery to %s complete!",
-                             (const char*)Util_convertBdAddr2Str(next_hop_node.addr));
-
-            //Reset all info
-            memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
-            numScanRequests = 0;
-            memset(curr_peer_addr, 0, B_ADDR_LEN);
-
-            //Reset advertising data
-            uint8_t advType = GAP_ADTYPE_ADV_SCAN_IND;
-            GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
-
-            //Set advertising to time-sync
-            advertData[MSG_TYPE_POS] = DEFFAULT_NO_MESSAGE;
-            GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
-
-            global_state = TSYNCED_SCANNING;
-          }
-        break;
-
         case TSYNCED_ADVERTISING:
+        break;
 
+        default:
         break;
       }
     }
@@ -1757,12 +1599,6 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         if(save_scan_device_info(pEvent->deviceInfo.addrType, pEvent->deviceInfo.addr) == SUCCESS)
           Event_post(syncEvent, TSYNC_MASTER_INIT);
       }
-      else if((pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_IND)
-                            && is_dirConnAddr_req(pEvent->deviceInfo.pEvtData, ROUTE_DISC))
-      {
-        if(save_scan_device_info(pEvent->deviceInfo.addrType, pEvent->deviceInfo.addr) == SUCCESS)
-          global_state = TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN;
-      }
       else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_SCAN_IND  &&
               is_timeSync_req(pEvent->deviceInfo.pEvtData))
       {
@@ -1858,11 +1694,6 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         if(global_state == USYNCED_ADV)
         {
           save_next_hop_info(pEvent->linkCmpl.devAddr);
-        }
-
-        if(global_state == TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN)
-        {
-          multi_role_startDiscovery(pEvent->linkCmpl.connectionHandle);
         }
 
         Event_post(syncEvent, CONNECTION_COMPLETE);
@@ -2914,6 +2745,11 @@ static void enter_state(enum global_state_t new_state)
       entry_func = usyncslave_entry_func;
       exit_func = usyncslave_exit_func;
     break;
+
+    case TSYNCED_STATUS_CHANGE:
+      entry_func = tchange_entry_func;
+      exit_func = tchange_exit_func;
+    break;
   }
 
   Event_post(syncEvent, ENTERING_STATE);
@@ -3078,21 +2914,6 @@ static void tscan_processEvts(uint32_t events)
   #endif
 
   }
-  //else if(events & START_ROUTE_DISC)
-  //{
-    //Starting route discovery
-    /*Display_print0(dispHandle, 15, 0, "Starting route discovery!");
-
-    //Set advertising type to scannable, non-connectable indirect advertising
-    uint8_t advType = GAP_ADTYPE_ADV_SCAN_IND;
-    GAPRole_SetParameter(GAPROLE_ADV_EVENT_TYPE, sizeof(uint8_t), &advType, NULL);
-
-    //Set advertising to time-sync
-    advertData[MSG_TYPE_POS] = ROUTE_DISC;
-    GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
-
-    global_state = TSYNCED_ROUTE_DISCOVERY;*/
-  //}
 }
 
 /*-----------------------------------------------------------------------*/
@@ -3110,6 +2931,60 @@ static void tsleep_processEvts(uint32_t events)
   else if(events & SLEEP_WAKEUP)
   {
     turn_off_led(GREEN);
+  }
+  else if(events & STATUS_CHANGE)
+  {
+    enter_state(TSYNCED_STATUS_CHANGE);
+  }
+}
+
+/*-----------------------------------------------------------------------*/
+
+/*-------------------TSYNCED_STATUS_CHANGE---------------------------------*/
+//Entry function
+static void tchange_entry_func(void *sub_state)
+{
+  turn_off_led(GREEN);
+}
+
+//Exit function
+static void tchange_exit_func(void)
+{
+  //TODO
+
+  //Reset time sync req list
+  memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
+  numTimeSyncRequests = 0;
+
+  //Reset connection handler
+  curr_conn_handle = INVALID_CONN_HANDLE;
+
+  //Go back to tsycned scanning
+  enter_state(TSYNCED_SCANNING);
+}
+
+//Handle Tsynced status change events
+static void tchange_processEvts(uint32_t events)
+{
+  //TODO
+  if(events & ENTERING_STATE)
+  {
+    entry_func(NULL);
+  }
+  else if(events & START_SCAN)
+  {
+    turn_on_led(RED);
+    Util_startClock(&sleepingClock);
+
+    //TODO
+    //if(set_and_start_advertising() == SUCCESS)
+   // {
+
+    //}
+  }
+  else if(events & SLEEP_WAKEUP)
+  {
+    turn_off_led(RED);
   }
 }
 
