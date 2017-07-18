@@ -116,15 +116,19 @@ Release Date: 2017-05-02 17:08:44
 #define DEFAULT_CONN_TIMEOUT                  1000
 #define DEFAULT_CONN_LATENCY                  0
 
+//Connecting timeout
+#define CONN_TIMEOUT                         40000
+
 // Default service discovery timer delay in ms
 #define DEFAULT_SVC_DISCOVERY_DELAY           1000
 
 // Scan parameters
-#define SCAN_MODULO                           4000 //change: 4/6 s
+#define SCAN_MODULO                           40000 //change: 4/6 s
+#define SLEEPING_TIMEOUT                      20000
+#define SCAN_REQ_DELAY_PERIOD                 20000 // change:2/4s to wait for scan responses
 #define DEFAULT_SCAN_DURATION                 2000 //change: 2/4s
-#define SCAN_REQ_DELAY_PERIOD                 2000 // change:2/4s to wait for scan responses
 #define DEFAULT_SCAN_WIND                     80
-#define DEFAULT_SCAN_INT                      160
+#define DEFAULT_SCAN_INT                      80
 
 //Maximum number of scan requests possible
 #define DEFAULT_MAX_SCAN_REQ                  10
@@ -201,15 +205,15 @@ Release Date: 2017-05-02 17:08:44
 #define MR_PASSCODE_NEEDED_EVT               Event_Id_05
 #define MR_PERIODIC_EVT                      Event_Id_06
 #define NOTIFY_ENABLE                        Event_Id_07
-
+#define SLEEP_WAKEUP                         Event_Id_08
 #define WRITE_DATA                           Event_Id_09
 #define MASTER_WRITE_RECVD                   Event_Id_10
 #define START_SCAN                           Event_Id_11
-
+#define CONN_TIMEOUT_EVT                     Event_Id_12
 #define SCAN_REQ_TIMEOUT                     Event_Id_13
 #define DIR_ADV_TIMEOUT                      Event_Id_14
 #define START_DIR_ADV                        Event_Id_15
-#define START_ROUTE_DISC                     Event_Id_16
+
 #define END_ROUTE_SCAN                       Event_Id_17
 #define DISCOVERABLE_NOW                     Event_Id_18
 #define NOT_DISCOVERABLE                     Event_Id_19
@@ -231,13 +235,14 @@ Release Date: 2017-05-02 17:08:44
                                              MR_PERIODIC_EVT         | \
                                              MR_PASSCODE_NEEDED_EVT  | \
                                              NOTIFY_ENABLE           | \
+                                             SLEEP_WAKEUP            | \
                                              WRITE_DATA              | \
                                              MASTER_WRITE_RECVD      | \
                                              START_SCAN              | \
+                                             CONN_TIMEOUT_EVT        | \
                                              SCAN_REQ_TIMEOUT        | \
                                              DIR_ADV_TIMEOUT         | \
                                              START_DIR_ADV           | \
-                                             START_ROUTE_DISC        | \
                                              END_ROUTE_SCAN          | \
                                              DISCOVERABLE_NOW        | \
                                              NOT_DISCOVERABLE        | \
@@ -271,9 +276,8 @@ typedef enum {
 
 // How often to perform periodic event (in msec)
 #define GLOBAL_TIME_CLOCK_PERIOD               1  //1ms clock time
-#define DIR_ADV_PERIOD                       4000 //5s wait time for dir advertising
-#define ROUTE_DISC_DELAY                     10000 // 10s wait time for route discovery
-#define WAIT_FOR_CONN_DURATION               6000 //6s to wait to connect
+#define DIR_ADV_PERIOD                       40000 //5s wait time for dir advertising
+#define WAIT_FOR_CONN_DURATION               60000 //6s to wait to connect
 
 //Invalid node info
 #define INVALID_NODE_INFO -1
@@ -387,9 +391,10 @@ static ICall_SyncHandle syncEvent;
 static Clock_Struct periodicClock;
 static Clock_Struct passiveAdvertClock;
 static Clock_Struct dirAdvClock;
-static Clock_Struct routeDiscClock;
 static Clock_Struct routeScanClock;
 static Clock_Struct waitForConnClock;
+static Clock_Struct sleepingClock;
+static Clock_Struct connTimeoutClock;
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
@@ -413,6 +418,7 @@ static uint8_t scanRspData[] =
 };
 
 enum global_state_t{
+  TSYNCED_SLEEPING,
   TSYNCED_SCANNING,
   TSYNCED_MASTER,
   USYNCED_ADV,
@@ -428,6 +434,7 @@ enum global_state_t{
 //Time synced master (TSM) states
 enum tsynced_master_t{
   TSM_CONNECTING,
+  TSM_WAITING_TO_PAIR,
   TSM_PAIRED,
   TSM_CC_ENABLED,
   TSM_T1_SENT,
@@ -438,6 +445,7 @@ enum tsynced_master_t{
 enum usyncslave_t{
   USYNCSLAVE_PAIRING,
   USYNCSLAVE_PAIRED,
+  USYNCSLAVE_WRITE_MASTER,
   USYNCSLAVE_T2_PRIME_SENT
 };
 
@@ -631,9 +639,10 @@ static void multi_role_pairStateCB(uint16_t connHandle, uint8_t state,
 static void global_time_clockHandler(UArg arg);
 static void scanRequest_timeoutHandler(UArg arg);
 static void dirAdv_clockHandler(UArg arg);
-static void routeDisc_clockHandler(UArg arg);
 static void routeScan_clockHandler(UArg arg);
 static void  waitForConn_clockHandler(UArg arg);
+static void wakeUp_clockHandler(UArg arg);
+static void connTimeout_clockHandler(UArg arg);
 static bool enable_notifs(uint8_t index);
 static uint64_t get_my_global_time(void);
 static bool write_to_server(uint8_t index, uint64_t time);
@@ -654,6 +663,9 @@ static int save_scan_device_info(uint8_t addrType, uint8_t *addr);
 //TSCAN related functions
 static void tscan_processEvts(uint32_t events);
 
+//TSLEEP related functions
+static void tsleep_processEvts(uint32_t events);
+
 //TSM related functions
 static void tsm_entry_func(void *sub_state);
 static void tsm_exit_func(void);
@@ -669,12 +681,13 @@ static void usyncadv_processEvts(uint32_t events);
 //USYNCSLAVE related functions
 static void usyncslave_entry_func(void *sub_state);
 static void usyncslave_exit_func(void);
-static void erase_next_hop_info(void);
+static void bad_exit(void);
 static void usyncslave_processEvts(uint32_t events);
 
 static void addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestReport);
 static uint8_t is_family(uint8_t *addr);
 static uint8_t *find_target_addr(int8_t *rssi);
+static bool cancel_connect(void);
 static bool connect(uint8_t addrType, uint8_t* addr);
 static bool is_timeSync_req(uint8_t * advData);
 static bool is_dirConnAddr_req(uint8_t * advData, int  msg);
@@ -771,12 +784,14 @@ static void multi_role_init(void)
                              SCAN_REQ_DELAY_PERIOD, 0, false, SCAN_REQ_TIMEOUT);
   Util_constructClock(&dirAdvClock, dirAdv_clockHandler,
                         DIR_ADV_PERIOD, 0, false, DIR_ADV_TIMEOUT);
-  Util_constructClock(&routeDiscClock, routeDisc_clockHandler,
-                      ROUTE_DISC_DELAY, 0, false, START_ROUTE_DISC);
   Util_constructClock(&routeScanClock, routeScan_clockHandler,
                       DEFAULT_SCAN_DURATION, 0, false, END_ROUTE_SCAN);
   Util_constructClock(&waitForConnClock, waitForConn_clockHandler,
                         WAIT_FOR_CONN_DURATION, 0, false, TIMEOUT_WAIT_FOR_CONN);
+  Util_constructClock(&sleepingClock, wakeUp_clockHandler,
+                          SLEEPING_TIMEOUT, 0, false, SLEEP_WAKEUP);
+  Util_constructClock(&connTimeoutClock, connTimeout_clockHandler,
+                            CONN_TIMEOUT, 0, false, CONN_TIMEOUT_EVT);
 
   // Init keys and LCD
   Board_initKeys(multi_role_keyChangeHandler);
@@ -1096,6 +1111,10 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
           tscan_processEvts(events);
         break;
 
+        case TSYNCED_SLEEPING:
+          tsleep_processEvts(events);
+        break;
+
         case USYNCED_ADV:
           usyncadv_processEvts(events);
         break;
@@ -1346,8 +1365,6 @@ static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg)
               if (scanRequestReport->BLEEventCode == HCI_BLE_SCAN_REQ_REPORT_EVENT)
               {
                 //Add device to info list
-                static int count = 0;
-                Display_print1(dispHandle, 14, 0, "sca req count: %d", ++count);
                 addToScanReqReceivedList(scanRequestReport);
               }
             }
@@ -1746,7 +1763,7 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
         if(save_scan_device_info(pEvent->deviceInfo.addrType, pEvent->deviceInfo.addr) == SUCCESS)
           global_state = TSYNCED_WAIT_ROUTE_DISC_CLIENT_CONN;
       }
-      else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_IND  &&
+      else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_SCAN_IND  &&
               is_timeSync_req(pEvent->deviceInfo.pEvtData))
       {
         add_to_timeSync_reqList(pEvent->deviceInfo);
@@ -2400,18 +2417,6 @@ static void dirAdv_clockHandler(UArg arg)
 }
 
 /*********************************************************************
- * @fn      routeDisc_clockHandler
- *
- * @brief   Handler function for route discovery
- *
- * @param   arg - event type
- */
-static void routeDisc_clockHandler(UArg arg)
-{
-  Event_post(syncEvent, arg);
-}
-
-/*********************************************************************
  * @fn      routeScan_clockHandler
  *
  * @brief   Handler function for route Scanning
@@ -2431,6 +2436,30 @@ static void routeScan_clockHandler(UArg arg)
  * @param   arg - event type
  */
 static void  waitForConn_clockHandler(UArg arg)
+{
+  Event_post(syncEvent, arg);
+}
+
+/*********************************************************************
+ * @fn      wakeUp_clockHandler
+ *
+ * @brief   Handler function to wake up from sleep
+ *
+ * @param   arg - event type
+ */
+static void wakeUp_clockHandler(UArg arg)
+{
+  Event_post(syncEvent, arg);
+}
+
+/*********************************************************************
+ * @fn      connTimeout_clockHandler
+ *
+ * @brief   Connection timeout handler
+ *
+ * @param   arg - event type
+ */
+static void connTimeout_clockHandler(UArg arg)
 {
   Event_post(syncEvent, arg);
 }
@@ -2576,6 +2605,19 @@ bool mr_doConnect(uint8_t index)
     Display_print0(dispHandle, MR_ROW_STATUS1, 0, "Connecting to:");
     Display_print0(dispHandle, MR_ROW_STATUS2, 0, (char*)devList[index].strAddr);
   }
+
+  return TRUE;
+}
+
+//Cancel given connection
+static bool cancel_connect(void)
+{
+  // Cancel connection request
+  GAPRole_TerminateConnection(GAP_CONNHANDLE_INIT);
+  Display_print0(dispHandle, MR_ROW_STATUS1, 0, "Connecting Cancelled");
+
+  // Clear connecting flag
+  connecting = FALSE;
 
   return TRUE;
 }
@@ -2853,6 +2895,7 @@ static void enter_state(enum global_state_t new_state)
   switch(new_state)
   {
     case TSYNCED_SCANNING:
+    case TSYNCED_SLEEPING:
       entry_func = NULL;
       exit_func = NULL;
     break;
@@ -3026,14 +3069,17 @@ static void tscan_processEvts(uint32_t events)
 
     connect(curr_peer_addr_type, curr_peer_addr);
 
+    //Connecting timeout clock
+    Util_startClock(&connTimeoutClock);
+
   #ifdef DEBUG_TSYNC
     Display_print1(dispHandle,18,0,"Tsync master connecting to: %s",
                      (const char*)Util_convertBdAddr2Str(curr_peer_addr));
   #endif
 
   }
-  else if(events & START_ROUTE_DISC)
-  {
+  //else if(events & START_ROUTE_DISC)
+  //{
     //Starting route discovery
     /*Display_print0(dispHandle, 15, 0, "Starting route discovery!");
 
@@ -3046,6 +3092,24 @@ static void tscan_processEvts(uint32_t events)
     GAPRole_SetParameter(GAPROLE_ADVERT_DATA, sizeof(advertData), advertData, NULL);
 
     global_state = TSYNCED_ROUTE_DISCOVERY;*/
+  //}
+}
+
+/*-----------------------------------------------------------------------*/
+
+/*-------------------TSYNCED_SLEEPING---------------------------------------*/
+
+//Handle Tsynced sleeping events
+static void tsleep_processEvts(uint32_t events)
+{
+  if(events & START_SCAN)
+  {
+    turn_on_led(GREEN);
+    Util_startClock(&sleepingClock);
+  }
+  else if(events & SLEEP_WAKEUP)
+  {
+    turn_off_led(GREEN);
   }
 }
 
@@ -3098,14 +3162,28 @@ static void tsm_processEvts(uint32_t events)
     return;
   }
 
+  if(events & DISCONNECTED)
+  {
+    exit_func();
+    return;
+  }
+
   switch (tsm_state)
   {
     case TSM_CONNECTING:
-      if(events & CONNECTION_COMPLETE)
+      if(events & CONN_TIMEOUT_EVT)
       {
-        //Nothing for now, but add a timeout clock later
+        cancel_connect();
+        exit_func();
       }
-      else if(events & OOB_PAIRING_COMPLETE)
+      else if(events & CONNECTION_COMPLETE)
+      {
+        tsm_state = TSM_WAITING_TO_PAIR;
+      }
+    break;
+
+    case TSM_WAITING_TO_PAIR:
+      if(events & OOB_PAIRING_COMPLETE)
       {
     #ifdef DEBUG_PAIRING
         Display_print0(dispHandle, 16, 0, "Pairing complete!");
@@ -3151,6 +3229,8 @@ static void tsm_processEvts(uint32_t events)
         T1 = get_my_global_time();
         if(tsm_write_data(T1) == SUCCESS)
           tsm_state = TSM_T1_SENT;
+        else
+          Event_post(syncEvent, WRITE_DATA);
       }
     break;
 
@@ -3161,21 +3241,13 @@ static void tsm_processEvts(uint32_t events)
         T2_prime = get_my_global_time();
         if(tsm_write_data(T2_prime) == SUCCESS)
           tsm_state = TSM_DELAY_RSP_SENT;
+        else
+          Event_post(syncEvent, WRITE_DATA);
       }
     break;
 
     case TSM_DELAY_RSP_SENT:
-      if(events & DISCONNECTED)
-      {
-        //If the no links exist, initiate route discovery
-        if(next_hop_node.valid == INVALID_NODE_INFO)
-        {
-          //Util_startClock(&routeDiscClock);
-        }
-
-        //Exit state
-        exit_func();
-      }
+       //For now, nothing to do here
      break;
 
     default:
@@ -3194,11 +3266,8 @@ static void usyncadv_entry_func(void *sub_state)
   numScanRequests = 0;
 
   //Set advertising type to scannable, non-connectable indirect advertising
-  //if(set_and_start_advertising(GAP_ADTYPE_ADV_SCAN_IND,
-  //                             TIME_SYNC_START, NULL) == FAILURE)
-   // return;
-  if(set_and_start_advertising(GAP_ADTYPE_ADV_IND,
-                                 TIME_SYNC_START, NULL) == FAILURE)
+  if(set_and_start_advertising(GAP_ADTYPE_ADV_SCAN_IND,
+                               TIME_SYNC_START, NULL) == FAILURE)
     return;
 
   turn_on_led(RED);
@@ -3242,7 +3311,6 @@ static void usyncadv_processEvts(uint32_t events)
         Display_print0(dispHandle, 15, 0, "starting passive clock!");
       #endif
         //Start clock for passive advertising
-        if(DEV_NUM != 2)
         Util_startClock(&passiveAdvertClock);
       }
       else if(events & SCAN_REQ_TIMEOUT)
@@ -3318,30 +3386,45 @@ static void usyncslave_entry_func(void *sub_state)
 }
 
 //Delete next node information
-static void erase_next_hop_info(void)
+static void bad_exit(void)
 {
+  //Erase hop info
   memset(next_hop_node.addr, 0, 0);
   next_hop_node.rssi = 0;
   next_hop_node.valid = INVALID_NODE_INFO;
+
+  turn_off_led(RED);
+
+  //Reset scanReqList
+  memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
+  numScanRequests = 0;
+
+  enter_state(USYNCED_ADV);
 }
 
 static void usyncslave_exit_func(void)
 {
   mr_doDisconnect(0);
 
+  turn_off_led(RED);
+
   //Reset scanReqList
   memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
   numScanRequests = 0;
 
-  enter_state(TSYNCED_SCANNING);
+  enter_state(TSYNCED_SLEEPING);
 }
-
-//Delete saved hop info
 
 //Handle Slave events related to time synchronization
 static void usyncslave_processEvts(uint32_t events)
 {
   static enum usyncslave_t usyncslave_state;
+
+  if(events & DISCONNECTED)
+  {
+    bad_exit();
+    return;
+  }
 
   switch(usyncslave_state)
   {
@@ -3354,9 +3437,9 @@ static void usyncslave_processEvts(uint32_t events)
       {
         Display_print0(dispHandle, 15, 0, "Pairing failed! Disconnect now!");
 
-        erase_next_hop_info();
+        mr_doDisconnect(0);
 
-        exit_func();
+        bad_exit();
       }
     break;
 
@@ -3370,15 +3453,26 @@ static void usyncslave_processEvts(uint32_t events)
         Display_print2(dispHandle, MR_ROW_STATUS2, 0, "t1: %u, t1_prime: %u", (uint32_t)T1, (uint32_t)T1_prime);
       #endif
 
+        usyncslave_state = USYNCSLAVE_WRITE_MASTER;
+        Event_post(syncEvent, MASTER_WRITE_RECVD);
+      }
+    break;
+
+    case USYNCSLAVE_WRITE_MASTER:
+      if(events & MASTER_WRITE_RECVD)
+      {
         //Notify the master of time T2
         T2 = get_my_global_time();
-        while(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
+        if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
                                       SIMPLEPROFILE_CHAR4_LEN,&T2) == FAILURE)
         {
           Display_print0(dispHandle, 15, 0, "Error! Notification send failed!");
+          Event_post(syncEvent, MASTER_WRITE_RECVD);
         }
-
-        usyncslave_state = USYNCSLAVE_T2_PRIME_SENT;
+        else
+        {
+          usyncslave_state = USYNCSLAVE_T2_PRIME_SENT;
+        }
       }
     break;
 
@@ -3396,10 +3490,6 @@ static void usyncslave_processEvts(uint32_t events)
         perform_time_sync();
 
         exit_func();
-
-        //If the no links exist, initiate route discovery
-        //if(next_hop_node.valid == INVALID_NODE_INFO)
-          //Util_startClock(&routeDiscClock);
       }
     break;
   }
@@ -3433,9 +3523,6 @@ static void addToScanReqReceivedList(hciEvt_BLEScanReqReport_t* scanRequestRepor
   scanReqList[numScanRequests].addrType = scanRequestReport->peerAddrType;
   numScanRequests++;
 
-  static int count = 17;
-  Display_print2(dispHandle, count++, 0,"scan req addr: %s, rssi: %d",
-                 (const char*)Util_convertBdAddr2Str(peerAddr), scanRequestReport->rssi);
 #ifdef DEBUG_TSYNC
   Display_print2(dispHandle, 21, 0, "Num scan requests: %d, rssi: %d",
                                    numScanRequests, scanRequestReport->rssi);
@@ -3454,6 +3541,10 @@ static void add_to_timeSync_reqList(gapDeviceInfoEvent_t deviceInfo)
       return;
     }
   }
+
+  static int count = 17;
+  Display_print1(dispHandle, count++, 0,"Scanned addr: %s",
+                 (const char *)Util_convertBdAddr2Str(peerAddr));
 
   //Store time sync requester information
   memcpy(timeSyncReqList[numTimeSyncRequests].addr, peerAddr, B_ADDR_LEN);
@@ -3492,10 +3583,7 @@ static uint8_t *find_target_addr(int8_t *rssi)
   uint8_t *target_addr = NULL;
   int8_t min_rssi = 0;
 
-  static int num = 18;
   for(int i = 0; i < numScanRequests; i++){
-   // Display_print2(dispHandle, num++, 0, "min_rssi: %d, addr: %s",
-   //                scanReqList[i].rssi, (const char*)Util_convertBdAddr2Str(scanReqList[i].addr) );
     if(is_family(scanReqList[i].addr) && scanReqList[i].rssi < min_rssi){
       min_rssi = scanReqList[i].rssi;
       target_addr = scanReqList[i].addr;

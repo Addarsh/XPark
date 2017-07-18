@@ -117,7 +117,7 @@ Clock_Handle Util_constructClock(Clock_Struct *pClock,
   Clock_Params clockParams;
 
   // Convert clockDuration in milliseconds to ticks.
-  uint32_t clockTicks = (clockDuration) * (1000 / Clock_tickPeriod);
+  uint32_t clockTicks = (clockDuration) * (100 / Clock_tickPeriod);
 
   // Setup parameters.
   Clock_Params_init(&clockParams);
@@ -126,7 +126,7 @@ Clock_Handle Util_constructClock(Clock_Struct *pClock,
   clockParams.arg = arg;
 
   // If period is 0, this is a one-shot timer.
-  clockParams.period = clockPeriod * (1000 / Clock_tickPeriod);
+  clockParams.period = clockPeriod * (100 / Clock_tickPeriod);
 
   // Starts immediately after construction if true, otherwise wait for a call
   // to start.
