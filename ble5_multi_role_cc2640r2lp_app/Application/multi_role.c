@@ -93,7 +93,7 @@ Release Date: 2017-05-02 17:08:44
 #ifdef GATEWAY
   #define DEV_NUM 1
 #else
-  #define DEV_NUM 3
+  #define DEV_NUM 2
 #endif
 
 //#define DEBUG_TSYNC   //Debug printfs for time syncing
@@ -159,10 +159,13 @@ Release Date: 2017-05-02 17:08:44
 #define DEFFAULT_NO_MESSAGE                    0xFF
 #define TIME_SYNC_START                        42
 #define DIRECT_ADV_CONN                        43
+#define SPOT_UPDATE                            44
 
 //Index for advert data positions
 #define MSG_TYPE_POS                           11
 #define ADDR_POS                               16
+
+#define RANDOM_DELAY                          15000
 
 // Type of Display to open
 #if !defined(Display_DISABLE_ALL)
@@ -212,17 +215,18 @@ Release Date: 2017-05-02 17:08:44
 #define SCAN_REQ_TIMEOUT                     Event_Id_13
 #define DIR_ADV_TIMEOUT                      Event_Id_14
 #define START_DIR_ADV                        Event_Id_15
-#define STATUS_CHANGE                        Event_Id_16
+#define STATUS_CHANGE_EVT                    Event_Id_16
 #define END_ROUTE_SCAN                       Event_Id_17
 #define DISCOVERABLE_NOW                     Event_Id_18
 #define NOT_DISCOVERABLE                     Event_Id_19
 #define CONNECTION_COMPLETE                  Event_Id_20
 #define DISCONNECTED                         Event_Id_21
 #define TIMEOUT_WAIT_FOR_CONN                Event_Id_22
-#define OOB_PAIRING_COMPLETE                 Event_Id_23
-#define OOB_PAIRING_FAILED                   Event_Id_24
+#define OOB_BONDING_COMPLETE                 Event_Id_23
+#define OOB_BONDING_FAILED                   Event_Id_24
 #define ENTERING_STATE                       Event_Id_25
 #define TSYNC_MASTER_INIT                    Event_Id_26
+#define TCHANGE_INIT                         Event_Id_27
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -242,17 +246,18 @@ Release Date: 2017-05-02 17:08:44
                                              SCAN_REQ_TIMEOUT        | \
                                              DIR_ADV_TIMEOUT         | \
                                              START_DIR_ADV           | \
-                                             STATUS_CHANGE           | \
+                                             STATUS_CHANGE_EVT       | \
                                              END_ROUTE_SCAN          | \
                                              DISCOVERABLE_NOW        | \
                                              NOT_DISCOVERABLE        | \
                                              CONNECTION_COMPLETE     | \
                                              DISCONNECTED            | \
                                              TIMEOUT_WAIT_FOR_CONN   | \
-                                             OOB_PAIRING_COMPLETE    | \
-                                             OOB_PAIRING_FAILED      | \
+                                             OOB_BONDING_COMPLETE    | \
+                                             OOB_BONDING_FAILED      | \
                                              ENTERING_STATE          | \
-                                             TSYNC_MASTER_INIT)
+                                             TSYNC_MASTER_INIT       | \
+                                             TCHANGE_INIT)
 
 // Discovery states
 typedef enum {
@@ -395,6 +400,7 @@ static Clock_Struct routeScanClock;
 static Clock_Struct waitForConnClock;
 static Clock_Struct sleepingClock;
 static Clock_Struct connTimeoutClock;
+static Clock_Struct randomClock;
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
@@ -423,14 +429,14 @@ enum global_state_t{
   TSYNCED_MASTER,
   USYNCED_ADV,
   USYNCED_SLAVE,
-  TSYNCED_STATUS_CHANGE,
-  TSYNCED_ADVERTISING
+  TSYNCED_CHANGE_SLAVE,
+  TSYNCED_CHANGE_MASTER,
 };
 
 //Time synced master (TSM) states
 enum tsynced_master_t{
   TSM_CONNECTING,
-  TSM_WAITING_TO_PAIR,
+  TSM_PAIRING,
   TSM_PAIRED,
   TSM_CC_ENABLED,
   TSM_T1_SENT,
@@ -450,6 +456,18 @@ enum usyncadv_t{
   USYNCADV_PASSIVE,
   USYNCADV_DIRECT,
   USYNCADV_CONNECTING
+};
+
+//Tsynced change slave advertising
+enum tchange_slave_t{
+  TCHANGE_SLAVE_ADV,
+  TCHANGE_SLAVE_BONDING_CNF
+};
+
+//Tsynced change master
+enum tchange_master_t{
+  TCHANGE_MASTER_CONNECTING,
+  TCHANGE_MASTER_CONNECTED,
 };
 
 static const uint8_t modified_addr[B_ADDR_LEN] = {DEV_NUM, 0x4, 0x8, 0x9, 0x0, 0xB};
@@ -633,6 +651,7 @@ static void routeScan_clockHandler(UArg arg);
 static void  waitForConn_clockHandler(UArg arg);
 static void wakeUp_clockHandler(UArg arg);
 static void connTimeout_clockHandler(UArg arg);
+static void random_clockHandler(UArg arg);
 static bool enable_notifs(uint8_t index);
 static uint64_t get_my_global_time(void);
 static bool write_to_server(uint8_t index, uint64_t time);
@@ -656,10 +675,15 @@ static void tscan_processEvts(uint32_t events);
 //TSLEEP related functions
 static void tsleep_processEvts(uint32_t events);
 
-//TCHANGE relayed functions
-static void tchange_entry_func(void *sub_state);
-static void tchange_exit_func(void);
-static void tchange_processEvts(uint32_t events);
+//TCHANGE Slave related functions
+static void tchange_slave_entry_func(void *sub_state);
+static void tchange_slave_exit_func(void);
+static void tchange_slave_processEvts(uint32_t events);
+
+//TCHANGE Master related functions
+static void tchange_master_entry_func(void *sub_state);
+static void tchange_master_exit_func(void);
+static void tchange_master_processEvts(uint32_t events);
 
 //TSM related functions
 static void tsm_entry_func(void *sub_state);
@@ -787,6 +811,8 @@ static void multi_role_init(void)
                           SLEEPING_TIMEOUT, 0, false, SLEEP_WAKEUP);
   Util_constructClock(&connTimeoutClock, connTimeout_clockHandler,
                             CONN_TIMEOUT, 0, false, CONN_TIMEOUT_EVT);
+  Util_constructClock(&randomClock, random_clockHandler,
+                              RANDOM_DELAY, 0, false, OOB_BONDING_COMPLETE);
 
   // Init keys and LCD
   Board_initKeys(multi_role_keyChangeHandler);
@@ -973,7 +999,7 @@ static void multi_role_init(void)
     uint8_t pairMode = GAPBOND_PAIRING_MODE_INITIATE;
     uint8_t mitm = TRUE;
     uint8_t ioCap = GAPBOND_IO_CAP_NO_INPUT_NO_OUTPUT;
-    uint8_t bonding = FALSE;
+    uint8_t bonding = TRUE;
 
     // Set pairing mode
     GAPBondMgr_SetParameter(GAPBOND_PAIRING_MODE, sizeof(uint8_t), &pairMode);
@@ -997,6 +1023,8 @@ static void multi_role_init(void)
     //Set OOB data
     GAPBondMgr_SetParameter(GAPBOND_OOB_DATA, KEYLEN, OOB_key);
 
+    //Erase all bonds on reset
+    GAPBondMgr_SetParameter(GAPBOND_ERASE_ALLBONDS,  0, NULL);
 
     // Register and start Bond Manager
     VOID GAPBondMgr_Register(&multi_role_BondMgrCBs);
@@ -1104,8 +1132,12 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
           tsleep_processEvts(events);
         break;
 
-        case TSYNCED_STATUS_CHANGE:
-          tchange_processEvts(events);
+        case TSYNCED_CHANGE_SLAVE:
+          tchange_slave_processEvts(events);
+        break;
+
+        case TSYNCED_CHANGE_MASTER:
+          tchange_master_processEvts(events);
         break;
 
         case USYNCED_ADV:
@@ -1118,9 +1150,6 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
 
         case TSYNCED_MASTER:
           tsm_processEvts(events);
-        break;
-
-        case TSYNCED_ADVERTISING:
         break;
 
         default:
@@ -1598,6 +1627,12 @@ static void multi_role_processRoleEvent(gapMultiRoleEvent_t *pEvent)
       {
         if(save_scan_device_info(pEvent->deviceInfo.addrType, pEvent->deviceInfo.addr) == SUCCESS)
           Event_post(syncEvent, TSYNC_MASTER_INIT);
+      }
+      else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_IND &&
+              is_dirConnAddr_req(pEvent->deviceInfo.pEvtData, SPOT_UPDATE))
+      {
+        if(save_scan_device_info(pEvent->deviceInfo.addrType, pEvent->deviceInfo.addr) == SUCCESS)
+          Event_post(syncEvent, TCHANGE_INIT);
       }
       else if(pEvent->deviceInfo.eventType == GAP_ADRPT_ADV_SCAN_IND  &&
               is_timeSync_req(pEvent->deviceInfo.pEvtData))
@@ -2173,12 +2208,10 @@ static void multi_role_processPairState(gapPairStateEvent_t* pairingEvent)
     if (pairingEvent->status == SUCCESS)
     {
       Display_print1(dispHandle, MR_ROW_SECURITY, 0,"connHandle %d paired", pairingEvent->connectionHandle);
-      Event_post(syncEvent, OOB_PAIRING_COMPLETE);
     }
     else
     {
       Display_print2(dispHandle, MR_ROW_SECURITY, 0, "pairing failed: %d", pairingEvent->connectionHandle, pairingEvent->status);
-      Event_post(syncEvent, OOB_PAIRING_FAILED);
     }
   }
   // If a bond has happened
@@ -2187,6 +2220,7 @@ static void multi_role_processPairState(gapPairStateEvent_t* pairingEvent)
     if (pairingEvent->status == SUCCESS)
     {
       Display_print1(dispHandle, MR_ROW_SECURITY, 0, "Cxn %d bonding success", pairingEvent->connectionHandle);
+      Event_post(syncEvent, OOB_BONDING_COMPLETE);
     }
   }
   // If a bond has been saved
@@ -2195,10 +2229,12 @@ static void multi_role_processPairState(gapPairStateEvent_t* pairingEvent)
     if (pairingEvent->status == SUCCESS)
     {
       Display_print1(dispHandle, MR_ROW_SECURITY, 0, "Cxn %d bond save success", pairingEvent->connectionHandle);
+      Util_startClock(&randomClock);
     }
     else
     {
       Display_print2(dispHandle, MR_ROW_SECURITY, 0, "Cxn %d bond save failed: %d", pairingEvent->connectionHandle, pairingEvent->status);
+      Event_post(syncEvent, OOB_BONDING_FAILED);
     }
   }
 }
@@ -2291,6 +2327,19 @@ static void wakeUp_clockHandler(UArg arg)
  * @param   arg - event type
  */
 static void connTimeout_clockHandler(UArg arg)
+{
+  Event_post(syncEvent, arg);
+}
+
+
+/*********************************************************************
+ * @fn      random_clockHandler
+ *
+ * @brief   random timeout handler
+ *
+ * @param   arg - event type
+ */
+static void random_clockHandler(UArg arg)
 {
   Event_post(syncEvent, arg);
 }
@@ -2746,9 +2795,14 @@ static void enter_state(enum global_state_t new_state)
       exit_func = usyncslave_exit_func;
     break;
 
-    case TSYNCED_STATUS_CHANGE:
-      entry_func = tchange_entry_func;
-      exit_func = tchange_exit_func;
+    case TSYNCED_CHANGE_SLAVE:
+      entry_func = tchange_slave_entry_func;
+      exit_func = tchange_slave_exit_func;
+    break;
+
+    case TSYNCED_CHANGE_MASTER:
+      entry_func = tchange_master_entry_func;
+      exit_func = tchange_master_exit_func;
     break;
   }
 
@@ -2914,6 +2968,16 @@ static void tscan_processEvts(uint32_t events)
   #endif
 
   }
+  else if(events & TCHANGE_INIT)
+  {
+    //Switch to tchange master state
+    enter_state(TSYNCED_CHANGE_MASTER);
+
+    connect(curr_peer_addr_type, curr_peer_addr);
+
+    //Connecting timeout clock
+    Util_startClock(&connTimeoutClock);
+  }
 }
 
 /*-----------------------------------------------------------------------*/
@@ -2923,68 +2987,139 @@ static void tscan_processEvts(uint32_t events)
 //Handle Tsynced sleeping events
 static void tsleep_processEvts(uint32_t events)
 {
+  static bool status_change = false;
   if(events & START_SCAN)
   {
     turn_on_led(GREEN);
     Util_startClock(&sleepingClock);
+    if(status_change){
+      enter_state(TSYNCED_CHANGE_SLAVE);
+      status_change = false;
+    }
   }
   else if(events & SLEEP_WAKEUP)
   {
     turn_off_led(GREEN);
   }
-  else if(events & STATUS_CHANGE)
+  else if(events & STATUS_CHANGE_EVT)
   {
-    enter_state(TSYNCED_STATUS_CHANGE);
+    status_change = true;
   }
 }
 
 /*-----------------------------------------------------------------------*/
 
-/*-------------------TSYNCED_STATUS_CHANGE---------------------------------*/
+/*-------------------TCHANGE_SLAVE---------------------------------------*/
 //Entry function
-static void tchange_entry_func(void *sub_state)
+static void tchange_slave_entry_func(void *sub_state)
 {
   turn_off_led(GREEN);
+
+  //Read new status value
+
+  if(set_and_start_advertising(GAP_ADTYPE_ADV_IND,
+                               SPOT_UPDATE, next_hop_node.addr) == FAILURE)
+    return;
+
+  *(enum tchange_slave_t *)sub_state = TCHANGE_SLAVE_ADV;
 }
 
 //Exit function
-static void tchange_exit_func(void)
+static void tchange_slave_exit_func(void)
 {
-  //TODO
+  turn_off_led(RED);
 
-  //Reset time sync req list
-  memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
-  numTimeSyncRequests = 0;
+  //Reset scanReqList
+  memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
+  numScanRequests = 0;
 
-  //Reset connection handler
-  curr_conn_handle = INVALID_CONN_HANDLE;
+  stop_advertising();
 
-  //Go back to tsycned scanning
+  enter_state(TSYNCED_SLEEPING);
+}
+
+//Handle Tchange status change events
+static void tchange_slave_processEvts(uint32_t events)
+{
+  static enum tchange_slave_t tchange_slave_state;
+
+  if(events & ENTERING_STATE)
+  {
+    entry_func(&tchange_slave_state);
+    return;
+  }
+
+  switch(tchange_slave_state)
+  {
+    case TCHANGE_SLAVE_ADV:
+      if(events & SLEEP_WAKEUP)
+      {
+        exit_func();
+        Event_post(syncEvent, STATUS_CHANGE_EVT);
+      }
+      else if(events & CONNECTION_COMPLETE)
+      {
+        stop_advertising();
+      }
+      else if(events & NOT_DISCOVERABLE)
+      {
+        tchange_slave_state = TCHANGE_SLAVE_BONDING_CNF;
+      }
+   break;
+
+    case TCHANGE_SLAVE_BONDING_CNF:
+        Display_print0(dispHandle, 17, 0,"Bonding Connected with master!");
+    break;
+  }
+}
+
+/*-----------------------------------------------------------------------*/
+
+/*-------------------TCHANGE_MASTER---------------------------------------*/
+//Entry function
+static void tchange_master_entry_func(void *sub_state)
+{
+  *(enum tchange_master_t *)sub_state = TCHANGE_MASTER_CONNECTING;
+}
+
+//Exit function
+static void tchange_master_exit_func(void)
+{
   enter_state(TSYNCED_SCANNING);
 }
 
-//Handle Tsynced status change events
-static void tchange_processEvts(uint32_t events)
+//Handle Tchange master status change events
+static void tchange_master_processEvts(uint32_t events)
 {
-  //TODO
+  static enum tchange_master_t tchange_master_state;
+
   if(events & ENTERING_STATE)
   {
-    entry_func(NULL);
+    entry_func(&tchange_master_state);
+    return;
   }
-  else if(events & START_SCAN)
-  {
-    turn_on_led(RED);
-    Util_startClock(&sleepingClock);
 
-    //TODO
-    //if(set_and_start_advertising() == SUCCESS)
-   // {
-
-    //}
-  }
-  else if(events & SLEEP_WAKEUP)
+  switch(tchange_master_state)
   {
-    turn_off_led(RED);
+    case TCHANGE_MASTER_CONNECTING:
+      if(events & SLEEP_WAKEUP)
+      {
+        exit_func();
+      }
+      else if(events & CONNECTION_COMPLETE)
+      {
+        //Start service discovery
+        multi_role_startDiscovery(curr_conn_handle);
+
+        tchange_master_state = TCHANGE_MASTER_CONNECTED;
+
+        Display_print0(dispHandle, 17, 0,"Bonding connected with slave!");
+      }
+    break;
+
+    case TCHANGE_MASTER_CONNECTED:
+      //TODO
+    break;
   }
 }
 
@@ -3053,12 +3188,12 @@ static void tsm_processEvts(uint32_t events)
       }
       else if(events & CONNECTION_COMPLETE)
       {
-        tsm_state = TSM_WAITING_TO_PAIR;
+        tsm_state = TSM_PAIRING;
       }
     break;
 
-    case TSM_WAITING_TO_PAIR:
-      if(events & OOB_PAIRING_COMPLETE)
+    case TSM_PAIRING:
+      if(events & OOB_BONDING_COMPLETE)
       {
     #ifdef DEBUG_PAIRING
         Display_print0(dispHandle, 16, 0, "Pairing complete!");
@@ -3068,7 +3203,7 @@ static void tsm_processEvts(uint32_t events)
 
         tsm_state = TSM_PAIRED;
       }
-      else if(events & OOB_PAIRING_FAILED)
+      else if(events & OOB_BONDING_FAILED)
       {
     #ifdef DEBUG_PAIRING
         Display_print0(dispHandle, 16, 0, "Pairing failed! Disconnect!");
@@ -3304,11 +3439,11 @@ static void usyncslave_processEvts(uint32_t events)
   switch(usyncslave_state)
   {
     case USYNCSLAVE_PAIRING:
-      if(events & OOB_PAIRING_COMPLETE)
+      if(events & OOB_BONDING_COMPLETE)
       {
         usyncslave_state = USYNCSLAVE_PAIRED;
       }
-      else if(events & OOB_PAIRING_FAILED)
+      else if(events & OOB_BONDING_FAILED)
       {
         Display_print0(dispHandle, 15, 0, "Pairing failed! Disconnect now!");
 
