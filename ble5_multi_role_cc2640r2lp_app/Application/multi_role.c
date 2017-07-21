@@ -88,12 +88,12 @@ Release Date: 2017-05-02 17:08:44
 * CONSTANTS
 */
 
-//#define GATEWAY
+#define GATEWAY
 
 #ifdef GATEWAY
   #define DEV_NUM 1
 #else
-  #define DEV_NUM 2
+  #define DEV_NUM 3
 #endif
 
 //#define DEBUG_TSYNC   //Debug printfs for time syncing
@@ -165,7 +165,7 @@ Release Date: 2017-05-02 17:08:44
 #define MSG_TYPE_POS                           11
 #define ADDR_POS                               16
 
-#define RANDOM_DELAY                          15000
+#define RANDOM_DELAY                          50000
 
 // Type of Display to open
 #if !defined(Display_DISABLE_ALL)
@@ -227,6 +227,7 @@ Release Date: 2017-05-02 17:08:44
 #define ENTERING_STATE                       Event_Id_25
 #define TSYNC_MASTER_INIT                    Event_Id_26
 #define TCHANGE_INIT                         Event_Id_27
+#define CC_ENABLED                           Event_Id_28
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -257,7 +258,8 @@ Release Date: 2017-05-02 17:08:44
                                              OOB_BONDING_FAILED      | \
                                              ENTERING_STATE          | \
                                              TSYNC_MASTER_INIT       | \
-                                             TCHANGE_INIT)
+                                             TCHANGE_INIT            | \
+                                             CC_ENABLED)
 
 // Discovery states
 typedef enum {
@@ -461,13 +463,17 @@ enum usyncadv_t{
 //Tsynced change slave advertising
 enum tchange_slave_t{
   TCHANGE_SLAVE_ADV,
-  TCHANGE_SLAVE_BONDING_CNF
+  TCHANGE_SLAVE_BONDING_CNF,
+  TCHANGE_SLAVE_BONDED,
+  TCHANGE_SLAVE_SENT_DATA
 };
 
 //Tsynced change master
 enum tchange_master_t{
   TCHANGE_MASTER_CONNECTING,
   TCHANGE_MASTER_CONNECTED,
+  TCHANGE_MASTER_BONDED,
+  TCHANGE_MASTER_WAITING
 };
 
 static const uint8_t modified_addr[B_ADDR_LEN] = {DEV_NUM, 0x4, 0x8, 0x9, 0x0, 0xB};
@@ -713,6 +719,7 @@ static bool is_dirConnAddr_req(uint8_t * advData, int  msg);
 static void add_to_timeSync_reqList(gapDeviceInfoEvent_t timeSyncSlave);
 static bool saved_time_sync_info(uint8_t *addr);
 static void reset_scan_discovery_info(void);
+static uint64_t get_spot_status(void);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -1117,7 +1124,8 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
         }
       }
 
-      if(events & START_SCAN){
+      if(events & START_SCAN)
+      {
         uint64_t my_time = get_my_global_time();
         Display_print1(dispHandle,12,0,"p: %d", my_time);
       }
@@ -1310,9 +1318,9 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
     attHandleValueNoti_t *msg_ptr = &(pMsg->msg.handleValueNoti);
     int len = msg_ptr->len;
     memcpy(&T2, msg_ptr->pValue,len);
-#ifdef DEBUG_TSYNC
+//#ifdef DEBUG_TSYNC
     Display_print1(dispHandle, 12, 0, "T2: %u", T2);
-#endif
+//#endif
 
     Event_post(syncEvent, WRITE_DATA);
   }
@@ -1866,6 +1874,7 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramID)
   #ifdef DEBUG_TSYNC
       Display_print0(dispHandle, 15, 0, "Client has enabled config!");
   #endif
+      Event_post(syncEvent, CC_ENABLED);
     break;
 
     default:
@@ -2083,15 +2092,19 @@ static void multi_role_processGATTDiscEvent(gattMsgEvent_t *pMsg)
                                                        pMsg->msg.readByTypeRsp.pDataList[att_len*i + 1]);
         }
 
-        if(global_state == TSYNCED_MASTER){
+        if(global_state == TSYNCED_MASTER || global_state == TSYNCED_CHANGE_MASTER)
+        {
           Event_post(syncEvent, NOTIFY_ENABLE);
         }
 
-#ifdef DEBUG_TSYNC
+    #ifdef DEBUG_TSYNC
         Display_print0(dispHandle,6,0,"recieved all characteristics!");
-#endif
-      }else{
+    #endif
+      }else
+      {
+    #ifdef DEBUG_TSYNC
           Display_print0(dispHandle,6,0,"recieved nothing!");
+    #endif
       }
     }
   }
@@ -2700,8 +2713,6 @@ static bool enable_notifs(uint8_t index)
 
         }
       }
-  }else{
-    Display_print0(dispHandle, 17, 0, "loda!");
   }
   return status;
 }
@@ -2992,7 +3003,8 @@ static void tsleep_processEvts(uint32_t events)
   {
     turn_on_led(GREEN);
     Util_startClock(&sleepingClock);
-    if(status_change){
+    if(status_change)
+    {
       enter_state(TSYNCED_CHANGE_SLAVE);
       status_change = false;
     }
@@ -3004,6 +3016,11 @@ static void tsleep_processEvts(uint32_t events)
   else if(events & STATUS_CHANGE_EVT)
   {
     status_change = true;
+  }
+  else if(events & OOB_BONDING_COMPLETE)
+  {
+    //TODO< remove this later when sensor values are used
+    Event_post(syncEvent, STATUS_CHANGE_EVT);
   }
 }
 
@@ -3021,6 +3038,7 @@ static void tchange_slave_entry_func(void *sub_state)
                                SPOT_UPDATE, next_hop_node.addr) == FAILURE)
     return;
 
+  turn_on_led(RED);
   *(enum tchange_slave_t *)sub_state = TCHANGE_SLAVE_ADV;
 }
 
@@ -3033,7 +3051,8 @@ static void tchange_slave_exit_func(void)
   memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
   numScanRequests = 0;
 
-  stop_advertising();
+  //Reset connection handler
+  curr_conn_handle = INVALID_CONN_HANDLE;
 
   enter_state(TSYNCED_SLEEPING);
 }
@@ -3049,26 +3068,60 @@ static void tchange_slave_processEvts(uint32_t events)
     return;
   }
 
+  if(events & DISCONNECTED)
+  {
+    exit_func();
+    return;
+  }
+
   switch(tchange_slave_state)
   {
     case TCHANGE_SLAVE_ADV:
       if(events & SLEEP_WAKEUP)
       {
+        stop_advertising();
         exit_func();
         Event_post(syncEvent, STATUS_CHANGE_EVT);
       }
       else if(events & CONNECTION_COMPLETE)
       {
-        stop_advertising();
-      }
-      else if(events & NOT_DISCOVERABLE)
-      {
         tchange_slave_state = TCHANGE_SLAVE_BONDING_CNF;
+        stop_advertising();
       }
    break;
 
     case TCHANGE_SLAVE_BONDING_CNF:
-        Display_print0(dispHandle, 17, 0,"Bonding Connected with master!");
+      if(events & OOB_BONDING_COMPLETE)
+      {
+        tchange_slave_state = TCHANGE_SLAVE_BONDED;
+      }
+      else if(events & OOB_BONDING_FAILED)
+      {
+        Display_print0(dispHandle, 17, 0,"Bonding failed with master!");
+        exit_func();
+      }
+    break;
+
+    case TCHANGE_SLAVE_BONDED:
+      if(events & CC_ENABLED)
+      {
+        //Send  status
+        uint64_t spot_status = get_spot_status();
+        if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
+                                      SIMPLEPROFILE_CHAR4_LEN, &spot_status) == FAILURE)
+        {
+          Display_print0(dispHandle, 15, 0, "Error! Notification send failed!");
+          Event_post(syncEvent, MASTER_WRITE_RECVD);
+        }
+        else
+        {
+          tchange_slave_state = TCHANGE_SLAVE_SENT_DATA;
+        }
+      }
+    break;
+
+    case TCHANGE_SLAVE_SENT_DATA:
+      //Nothing to do here
     break;
   }
 }
@@ -3085,6 +3138,13 @@ static void tchange_master_entry_func(void *sub_state)
 //Exit function
 static void tchange_master_exit_func(void)
 {
+  //Reset time sync req list
+  memset(timeSyncReqList, 0, numTimeSyncRequests*sizeof(mrDevRec_t));
+  numTimeSyncRequests = 0;
+
+  //Reset connection handler
+  curr_conn_handle = INVALID_CONN_HANDLE;
+
   enter_state(TSYNCED_SCANNING);
 }
 
@@ -3099,26 +3159,73 @@ static void tchange_master_processEvts(uint32_t events)
     return;
   }
 
+  if(events & DISCONNECTED)
+  {
+    exit_func();
+    return;
+  }
+
   switch(tchange_master_state)
   {
     case TCHANGE_MASTER_CONNECTING:
       if(events & SLEEP_WAKEUP)
       {
+        cancel_connect();
         exit_func();
       }
       else if(events & CONNECTION_COMPLETE)
       {
-        //Start service discovery
-        multi_role_startDiscovery(curr_conn_handle);
-
         tchange_master_state = TCHANGE_MASTER_CONNECTED;
-
-        Display_print0(dispHandle, 17, 0,"Bonding connected with slave!");
       }
     break;
 
     case TCHANGE_MASTER_CONNECTED:
-      //TODO
+      if(events & OOB_BONDING_COMPLETE)
+      {
+        tchange_master_state = TCHANGE_MASTER_BONDED;
+
+        //Start service discovery
+        multi_role_startDiscovery(curr_conn_handle);
+      }
+      else if(events & OOB_BONDING_FAILED)
+      {
+        exit_func();
+      }
+    break;
+
+    case TCHANGE_MASTER_BONDED:
+      if(events & NOTIFY_ENABLE)
+      {
+        //Enable CC in client
+        if(enable_notifs(0) == FAILURE)
+        {
+          Event_post(syncEvent, NOTIFY_ENABLE);
+        }
+        else
+        {
+          tchange_master_state = TCHANGE_MASTER_WAITING;
+        }
+      }
+    break;
+
+    case TCHANGE_MASTER_WAITING:
+      if(events & WRITE_DATA)
+      {
+        //Received spot data from slave
+        //T2 Variable contains the spot update
+        if(T2 == 0)
+        {
+          Display_print0(dispHandle, 20, 0, " Spot is open!");
+        }
+        else
+        {
+          Display_print0(dispHandle, 20, 0, "Spot is occupied!");
+        }
+
+        mr_doDisconnect(0);
+
+        exit_func();
+      }
     break;
   }
 }
@@ -3409,6 +3516,8 @@ static void bad_exit(void)
   memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
   numScanRequests = 0;
 
+  curr_conn_handle = INVALID_CONN_HANDLE;
+
   enter_state(USYNCED_ADV);
 }
 
@@ -3417,6 +3526,8 @@ static void usyncslave_exit_func(void)
   mr_doDisconnect(0);
 
   turn_off_led(RED);
+
+  curr_conn_handle = INVALID_CONN_HANDLE;
 
   //Reset scanReqList
   memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
@@ -3500,6 +3611,9 @@ static void usyncslave_processEvts(uint32_t events)
         perform_time_sync();
 
         exit_func();
+
+        //TODO, remove later once sensor is incorporated
+        Util_startClock(&randomClock);
       }
     break;
   }
@@ -3633,6 +3747,13 @@ static void reset_scan_discovery_info(void)
 {
   memset(devList, 0, numScanDevs * sizeof(mrDevRec_t));
   numScanDevs = 0;
+}
+
+//Returns the current spot status
+//TODO: link to sensor value
+static uint64_t get_spot_status(void)
+{
+  return 0;
 }
 
 /*********************************************************************
