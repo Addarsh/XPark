@@ -33,6 +33,13 @@ ORDERED_OBJS += \
 "./Startup/board.obj" \
 "./Startup/ccfg_app_ble.obj" \
 "./Startup/main.obj" \
+"./VL53L0X_1.0.2/vl53l0x_api.obj" \
+"./VL53L0X_1.0.2/vl53l0x_api_calibration.obj" \
+"./VL53L0X_1.0.2/vl53l0x_api_core.obj" \
+"./VL53L0X_1.0.2/vl53l0x_api_ranging.obj" \
+"./VL53L0X_1.0.2/vl53l0x_api_strings.obj" \
+"./VL53L0X_1.0.2/vl53l0x_platform.obj" \
+"./VL53L0X_1.0.2/vl53l0x_platform_log.obj" \
 $(GEN_CMDS__FLAG) \
 -l"C:/ti/simplelink_cc2640r2_sdk_1_35_00_33/source/ti/devices/cc26x0r2/driverlib/bin/ccs/driverlib.lib" \
 -l"C:/ti/simplelink_cc2640r2_sdk_1_35_00_33/kernel/tirtos/packages/ti/dpl/lib/dpl_cc26x0r2.aem3" \
@@ -60,6 +67,7 @@ RMDIR := RMDIR /S/Q
 -include PROFILES/subdir_vars.mk
 -include Startup/subdir_vars.mk
 -include TOOLS/subdir_vars.mk
+-include VL53L0X_1.0.2/subdir_vars.mk
 -include Application/subdir_rules.mk
 -include Drivers/ECC/subdir_rules.mk
 -include Drivers/RF/subdir_rules.mk
@@ -69,6 +77,7 @@ RMDIR := RMDIR /S/Q
 -include PROFILES/subdir_rules.mk
 -include Startup/subdir_rules.mk
 -include TOOLS/subdir_rules.mk
+-include VL53L0X_1.0.2/subdir_rules.mk
 -include objects.mk
 
 ifneq ($(MAKECMDGOALS),clean)
@@ -204,8 +213,8 @@ ble5_multi_role_cc2640r2lp_app.hex: $(EXE_OUTPUTS)
 clean:
 	-$(RM) $(GEN_CMDS__QUOTED)$(GEN_MISC_FILES__QUOTED)$(BIN_OUTPUTS__QUOTED)$(GEN_FILES__QUOTED)$(EXE_OUTPUTS__QUOTED)$(GEN_OPTS__QUOTED)
 	-$(RMDIR) $(GEN_MISC_DIRS__QUOTED)
-	-$(RM) "Application\aes.obj" "Application\board_key.obj" "Application\hal_assert.obj" "Application\multi_role.obj" "Application\multi_role_menu.obj" "Application\two_btn_menu.obj" "Application\util.obj" "Drivers\ECC\ECCROMCC26XX.obj" "Drivers\RF\RFCC26XX_singleMode.obj" "Drivers\TRNG\TRNGCC26XX.obj" "ICall\icall.obj" "ICall\icall_cc2650.obj" "ICall\icall_user_config.obj" "ICallBLE\ble_user_config.obj" "ICallBLE\icall_api_lite.obj" "PROFILES\devinfoservice.obj" "PROFILES\gatt_uuid.obj" "PROFILES\gattservapp_util.obj" "PROFILES\multi.obj" "PROFILES\simple_gatt_profile.obj" "Startup\board.obj" "Startup\ccfg_app_ble.obj" "Startup\main.obj" 
-	-$(RM) "Application\aes.d" "Application\board_key.d" "Application\hal_assert.d" "Application\multi_role.d" "Application\multi_role_menu.d" "Application\two_btn_menu.d" "Application\util.d" "Drivers\ECC\ECCROMCC26XX.d" "Drivers\RF\RFCC26XX_singleMode.d" "Drivers\TRNG\TRNGCC26XX.d" "ICall\icall.d" "ICall\icall_cc2650.d" "ICall\icall_user_config.d" "ICallBLE\ble_user_config.d" "ICallBLE\icall_api_lite.d" "PROFILES\devinfoservice.d" "PROFILES\gatt_uuid.d" "PROFILES\gattservapp_util.d" "PROFILES\multi.d" "PROFILES\simple_gatt_profile.d" "Startup\board.d" "Startup\ccfg_app_ble.d" "Startup\main.d" 
+	-$(RM) "Application\aes.obj" "Application\board_key.obj" "Application\hal_assert.obj" "Application\multi_role.obj" "Application\multi_role_menu.obj" "Application\two_btn_menu.obj" "Application\util.obj" "Drivers\ECC\ECCROMCC26XX.obj" "Drivers\RF\RFCC26XX_singleMode.obj" "Drivers\TRNG\TRNGCC26XX.obj" "ICall\icall.obj" "ICall\icall_cc2650.obj" "ICall\icall_user_config.obj" "ICallBLE\ble_user_config.obj" "ICallBLE\icall_api_lite.obj" "PROFILES\devinfoservice.obj" "PROFILES\gatt_uuid.obj" "PROFILES\gattservapp_util.obj" "PROFILES\multi.obj" "PROFILES\simple_gatt_profile.obj" "Startup\board.obj" "Startup\ccfg_app_ble.obj" "Startup\main.obj" "VL53L0X_1.0.2\vl53l0x_api.obj" "VL53L0X_1.0.2\vl53l0x_api_calibration.obj" "VL53L0X_1.0.2\vl53l0x_api_core.obj" "VL53L0X_1.0.2\vl53l0x_api_ranging.obj" "VL53L0X_1.0.2\vl53l0x_api_strings.obj" "VL53L0X_1.0.2\vl53l0x_platform.obj" "VL53L0X_1.0.2\vl53l0x_platform_log.obj" 
+	-$(RM) "Application\aes.d" "Application\board_key.d" "Application\hal_assert.d" "Application\multi_role.d" "Application\multi_role_menu.d" "Application\two_btn_menu.d" "Application\util.d" "Drivers\ECC\ECCROMCC26XX.d" "Drivers\RF\RFCC26XX_singleMode.d" "Drivers\TRNG\TRNGCC26XX.d" "ICall\icall.d" "ICall\icall_cc2650.d" "ICall\icall_user_config.d" "ICallBLE\ble_user_config.d" "ICallBLE\icall_api_lite.d" "PROFILES\devinfoservice.d" "PROFILES\gatt_uuid.d" "PROFILES\gattservapp_util.d" "PROFILES\multi.d" "PROFILES\simple_gatt_profile.d" "Startup\board.d" "Startup\ccfg_app_ble.d" "Startup\main.d" "VL53L0X_1.0.2\vl53l0x_api.d" "VL53L0X_1.0.2\vl53l0x_api_calibration.d" "VL53L0X_1.0.2\vl53l0x_api_core.d" "VL53L0X_1.0.2\vl53l0x_api_ranging.d" "VL53L0X_1.0.2\vl53l0x_api_strings.d" "VL53L0X_1.0.2\vl53l0x_platform.d" "VL53L0X_1.0.2\vl53l0x_platform_log.d" 
 	-@echo 'Finished clean'
 	-@echo ' '
 

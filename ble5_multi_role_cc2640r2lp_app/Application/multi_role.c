@@ -83,17 +83,18 @@ Release Date: 2017-05-02 17:08:44
 #include "multi_role_menu.h"
 #include "multi_role.h"
 #include "aes.h"
+#include "VL53L0X_1.0.2/vl53l0x_api.h"
 
 /*********************************************************************
 * CONSTANTS
 */
 
-#define GATEWAY
+//#define GATEWAY
 
 #ifdef GATEWAY
   #define DEV_NUM 1
 #else
-  #define DEV_NUM 3
+  #define DEV_NUM 2
 #endif
 
 //#define DEBUG_TSYNC   //Debug printfs for time syncing
