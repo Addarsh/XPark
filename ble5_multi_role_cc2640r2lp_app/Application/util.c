@@ -179,7 +179,7 @@ void Util_restartClock(Clock_Struct *pClock, uint32_t clockTimeout)
   }
 
   // Convert timeout in milliseconds to ticks.
-  clockTicks = clockTimeout * (1000 / Clock_tickPeriod);
+  clockTicks = clockTimeout * (100 / Clock_tickPeriod);
 
   // Set the initial timeout
   Clock_setTimeout(handle, clockTicks);

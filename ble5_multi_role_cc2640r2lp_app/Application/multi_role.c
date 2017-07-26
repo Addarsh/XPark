@@ -83,13 +83,12 @@ Release Date: 2017-05-02 17:08:44
 #include "multi_role_menu.h"
 #include "multi_role.h"
 #include "aes.h"
-#include "VL53L0X_1.0.2/vl53l0x_api.h"
 
 /*********************************************************************
 * CONSTANTS
 */
 
-//#define GATEWAY
+#define GATEWAY
 
 #ifdef GATEWAY
   #define DEV_NUM 1
@@ -166,7 +165,13 @@ Release Date: 2017-05-02 17:08:44
 #define MSG_TYPE_POS                           11
 #define ADDR_POS                               16
 
-#define RANDOM_DELAY                          50000
+#define RANDOM_DELAY                          50000  //5s
+
+//Time for sensor to be awake
+#define AWAKE_TIME                            20000   //2s
+
+//Sensor absolute waking time
+#define GLOBAL_WAKEUP_TIME                    200000  //20s
 
 // Type of Display to open
 #if !defined(Display_DISABLE_ALL)
@@ -208,7 +213,7 @@ Release Date: 2017-05-02 17:08:44
 #define MR_PASSCODE_NEEDED_EVT               Event_Id_05
 #define MR_PERIODIC_EVT                      Event_Id_06
 #define NOTIFY_ENABLE                        Event_Id_07
-#define SLEEP_WAKEUP                         Event_Id_08
+#define GO_TO_SLEEP_EVT                      Event_Id_08
 #define WRITE_DATA                           Event_Id_09
 #define MASTER_WRITE_RECVD                   Event_Id_10
 #define START_SCAN                           Event_Id_11
@@ -229,6 +234,7 @@ Release Date: 2017-05-02 17:08:44
 #define TSYNC_MASTER_INIT                    Event_Id_26
 #define TCHANGE_INIT                         Event_Id_27
 #define CC_ENABLED                           Event_Id_28
+#define SLEEP_WAKEUP_EVT                     Event_Id_29
 
 #define MR_ALL_EVENTS                        (MR_ICALL_EVT           | \
                                              MR_QUEUE_EVT            | \
@@ -240,7 +246,7 @@ Release Date: 2017-05-02 17:08:44
                                              MR_PERIODIC_EVT         | \
                                              MR_PASSCODE_NEEDED_EVT  | \
                                              NOTIFY_ENABLE           | \
-                                             SLEEP_WAKEUP            | \
+                                             GO_TO_SLEEP_EVT         | \
                                              WRITE_DATA              | \
                                              MASTER_WRITE_RECVD      | \
                                              START_SCAN              | \
@@ -260,7 +266,8 @@ Release Date: 2017-05-02 17:08:44
                                              ENTERING_STATE          | \
                                              TSYNC_MASTER_INIT       | \
                                              TCHANGE_INIT            | \
-                                             CC_ENABLED)
+                                             CC_ENABLED              | \
+                                             SLEEP_WAKEUP_EVT)
 
 // Discovery states
 typedef enum {
@@ -401,9 +408,10 @@ static Clock_Struct passiveAdvertClock;
 static Clock_Struct dirAdvClock;
 static Clock_Struct routeScanClock;
 static Clock_Struct waitForConnClock;
-static Clock_Struct sleepingClock;
 static Clock_Struct connTimeoutClock;
 static Clock_Struct randomClock;
+static Clock_Struct sleepWakeUpClock;
+static Clock_Struct awakeClock;
 
 // Queue object used for app messages
 static Queue_Struct appMsg;
@@ -494,6 +502,10 @@ static void (*exit_func)(void);
 
 //Global clock for time syncronization
 static uint64_t my_global_time;
+
+//Last updated parking status
+static uint64_t last_spot_status = 2;
+static uint64_t curr_spot_status;
 
 //Current connection handle
 static uint16_t curr_conn_handle = INVALID_CONN_HANDLE;
@@ -656,9 +668,11 @@ static void scanRequest_timeoutHandler(UArg arg);
 static void dirAdv_clockHandler(UArg arg);
 static void routeScan_clockHandler(UArg arg);
 static void  waitForConn_clockHandler(UArg arg);
-static void wakeUp_clockHandler(UArg arg);
 static void connTimeout_clockHandler(UArg arg);
 static void random_clockHandler(UArg arg);
+static void awake_clockHandler(UArg arg);
+static void wakeup_clockHandler(UArg arg);
+
 static bool enable_notifs(uint8_t index);
 static uint64_t get_my_global_time(void);
 static bool write_to_server(uint8_t index, uint64_t time);
@@ -815,12 +829,12 @@ static void multi_role_init(void)
                       DEFAULT_SCAN_DURATION, 0, false, END_ROUTE_SCAN);
   Util_constructClock(&waitForConnClock, waitForConn_clockHandler,
                         WAIT_FOR_CONN_DURATION, 0, false, TIMEOUT_WAIT_FOR_CONN);
-  Util_constructClock(&sleepingClock, wakeUp_clockHandler,
-                          SLEEPING_TIMEOUT, 0, false, SLEEP_WAKEUP);
   Util_constructClock(&connTimeoutClock, connTimeout_clockHandler,
                             CONN_TIMEOUT, 0, false, CONN_TIMEOUT_EVT);
   Util_constructClock(&randomClock, random_clockHandler,
                               RANDOM_DELAY, 0, false, OOB_BONDING_COMPLETE);
+  Util_constructClock(&awakeClock, awake_clockHandler,
+                                AWAKE_TIME, 0, false, GO_TO_SLEEP_EVT);
 
   // Init keys and LCD
   Board_initKeys(multi_role_keyChangeHandler);
@@ -2321,17 +2335,6 @@ static void  waitForConn_clockHandler(UArg arg)
   Event_post(syncEvent, arg);
 }
 
-/*********************************************************************
- * @fn      wakeUp_clockHandler
- *
- * @brief   Handler function to wake up from sleep
- *
- * @param   arg - event type
- */
-static void wakeUp_clockHandler(UArg arg)
-{
-  Event_post(syncEvent, arg);
-}
 
 /*********************************************************************
  * @fn      connTimeout_clockHandler
@@ -2354,6 +2357,30 @@ static void connTimeout_clockHandler(UArg arg)
  * @param   arg - event type
  */
 static void random_clockHandler(UArg arg)
+{
+  Event_post(syncEvent, arg);
+}
+
+/*********************************************************************
+ * @fn      awake_clockHandler
+ *
+ * @brief   awake clock handler
+ *
+ * @param   arg - event type
+ */
+static void awake_clockHandler(UArg arg)
+{
+  Event_post(syncEvent, arg);
+}
+
+/*********************************************************************
+ * @fn      wakeup_clockHandler
+ *
+ * @brief   wakeup clock handler
+ *
+ * @param   arg - event type
+ */
+static void wakeup_clockHandler(UArg arg)
 {
   Event_post(syncEvent, arg);
 }
@@ -2999,29 +3026,42 @@ static void tscan_processEvts(uint32_t events)
 //Handle Tsynced sleeping events
 static void tsleep_processEvts(uint32_t events)
 {
-  static bool status_change = false;
-  if(events & START_SCAN)
+  static int count = 0;
+  if(events & ENTERING_STATE)
   {
-    turn_on_led(GREEN);
-    Util_startClock(&sleepingClock);
-    if(status_change)
+   if(count == 0)
+   {
+     Util_constructClock(&sleepWakeUpClock, wakeup_clockHandler,
+                              GLOBAL_WAKEUP_TIME - (get_my_global_time() % GLOBAL_WAKEUP_TIME),
+                             0, true, SLEEP_WAKEUP_EVT);
+     count++;
+   }
+   else
+   {
+     Util_restartClock(&sleepWakeUpClock, GLOBAL_WAKEUP_TIME - (get_my_global_time() % GLOBAL_WAKEUP_TIME));
+   }
+  }
+  else if(events & SLEEP_WAKEUP_EVT)
+  {
+    Display_print0(dispHandle, 18, 0, "waking up!");
+    curr_spot_status = get_spot_status();
+
+    if(curr_spot_status != last_spot_status)
     {
+      turn_on_led(GREEN);
+      Util_startClock(&awakeClock);
       enter_state(TSYNCED_CHANGE_SLAVE);
-      status_change = false;
+    }else
+    {
+      Display_print0(dispHandle, 18, 0, "entering sleep!");
+      enter_state(TSYNCED_SLEEPING);
     }
   }
-  else if(events & SLEEP_WAKEUP)
+  else if(events & GO_TO_SLEEP_EVT)
   {
     turn_off_led(GREEN);
-  }
-  else if(events & STATUS_CHANGE_EVT)
-  {
-    status_change = true;
-  }
-  else if(events & OOB_BONDING_COMPLETE)
-  {
-    //TODO< remove this later when sensor values are used
-    Event_post(syncEvent, STATUS_CHANGE_EVT);
+
+    enter_state(TSYNCED_SLEEPING);
   }
 }
 
@@ -3031,22 +3071,17 @@ static void tsleep_processEvts(uint32_t events)
 //Entry function
 static void tchange_slave_entry_func(void *sub_state)
 {
-  turn_off_led(GREEN);
-
-  //Read new status value
-
   if(set_and_start_advertising(GAP_ADTYPE_ADV_IND,
                                SPOT_UPDATE, next_hop_node.addr) == FAILURE)
     return;
 
-  turn_on_led(RED);
   *(enum tchange_slave_t *)sub_state = TCHANGE_SLAVE_ADV;
 }
 
 //Exit function
 static void tchange_slave_exit_func(void)
 {
-  turn_off_led(RED);
+  turn_off_led(GREEN);
 
   //Reset scanReqList
   memset(scanReqList, 0, sizeof(mrDevRec_t) * DEFAULT_MAX_SCAN_REQ);
@@ -3055,6 +3090,7 @@ static void tchange_slave_exit_func(void)
   //Reset connection handler
   curr_conn_handle = INVALID_CONN_HANDLE;
 
+  Display_print0(dispHandle, 18, 0, "entering sleep!");
   enter_state(TSYNCED_SLEEPING);
 }
 
@@ -3078,11 +3114,10 @@ static void tchange_slave_processEvts(uint32_t events)
   switch(tchange_slave_state)
   {
     case TCHANGE_SLAVE_ADV:
-      if(events & SLEEP_WAKEUP)
+      if(events & GO_TO_SLEEP_EVT)
       {
         stop_advertising();
         exit_func();
-        Event_post(syncEvent, STATUS_CHANGE_EVT);
       }
       else if(events & CONNECTION_COMPLETE)
       {
@@ -3107,22 +3142,22 @@ static void tchange_slave_processEvts(uint32_t events)
       if(events & CC_ENABLED)
       {
         //Send  status
-        uint64_t spot_status = get_spot_status();
         if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
-                                      SIMPLEPROFILE_CHAR4_LEN, &spot_status) == FAILURE)
+                                      SIMPLEPROFILE_CHAR4_LEN, &curr_spot_status) == FAILURE)
         {
           Display_print0(dispHandle, 15, 0, "Error! Notification send failed!");
-          Event_post(syncEvent, MASTER_WRITE_RECVD);
+          Event_post(syncEvent, CC_ENABLED);
         }
         else
         {
           tchange_slave_state = TCHANGE_SLAVE_SENT_DATA;
+          last_spot_status =  curr_spot_status;
         }
       }
     break;
 
     case TCHANGE_SLAVE_SENT_DATA:
-      //Nothing to do here
+      //Nothing to be done for now
     break;
   }
 }
@@ -3169,7 +3204,7 @@ static void tchange_master_processEvts(uint32_t events)
   switch(tchange_master_state)
   {
     case TCHANGE_MASTER_CONNECTING:
-      if(events & SLEEP_WAKEUP)
+      if(events & CONN_TIMEOUT_EVT)
       {
         cancel_connect();
         exit_func();
@@ -3612,9 +3647,6 @@ static void usyncslave_processEvts(uint32_t events)
         perform_time_sync();
 
         exit_func();
-
-        //TODO, remove later once sensor is incorporated
-        Util_startClock(&randomClock);
       }
     break;
   }
@@ -3754,7 +3786,7 @@ static void reset_scan_discovery_info(void)
 //TODO: link to sensor value
 static uint64_t get_spot_status(void)
 {
-  return 0;
+  return (HalTRNG_GetTRNG() % 2);
 }
 
 /*********************************************************************
