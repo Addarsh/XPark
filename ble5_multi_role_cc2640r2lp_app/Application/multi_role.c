@@ -3251,11 +3251,11 @@ static void tchange_master_processEvts(uint32_t events)
         //T2 Variable contains the spot update
         if(T2 == 0)
         {
-          Display_print0(dispHandle, 20, 0, " Spot is open!");
+          Display_print1(dispHandle, 20, 0, " Spot %d is open!", curr_peer_addr[0]);
         }
         else
         {
-          Display_print0(dispHandle, 20, 0, "Spot is occupied!");
+          Display_print1(dispHandle, 20, 0, "Spot %d is occupied!", curr_peer_addr[0]);
         }
 
         mr_doDisconnect(0);
