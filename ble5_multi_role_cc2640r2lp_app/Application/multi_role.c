@@ -84,16 +84,19 @@ Release Date: 2017-05-02 17:08:44
 #include "multi_role.h"
 #include "aes.h"
 
+#include <ti/drivers/UART.h>
+#include <ti/drivers/uart/UARTCC26XX.h>
+
 /*********************************************************************
 * CONSTANTS
 */
 
-//#define GATEWAY
+#define GATEWAY
 
 #ifdef GATEWAY
   #define DEV_NUM 1
 #else
-  #define DEV_NUM 3
+  #define DEV_NUM 2
 #endif
 
 //#define DEBUG_TSYNC   //Debug printfs for time syncing
@@ -174,7 +177,7 @@ Release Date: 2017-05-02 17:08:44
 #define GLOBAL_WAKEUP_TIME                    200000  //20s
 
 //State timeout time
-#define STATE_TIMEOUT_TIME                    80000 // 8 s
+#define STATE_TIMEOUT_TIME                    120000 // 12 s
 
 // Type of Display to open
 #if !defined(Display_DISABLE_ALL)
@@ -546,6 +549,7 @@ static PIN_State ledPinState;
 PIN_Config ledPinTable[] = {
   Board_RLED | PIN_GPIO_OUTPUT_EN | PIN_GPIO_LOW | PIN_PUSHPULL | PIN_DRVSTR_MAX,
   Board_GLED | PIN_GPIO_OUTPUT_EN | PIN_GPIO_LOW | PIN_PUSHPULL | PIN_DRVSTR_MAX,
+  Board_DIO22| PIN_INPUT_EN | PIN_PULLUP,
   PIN_TERMINATE
 };
 
@@ -584,6 +588,10 @@ static uint8_t advertData[] =
   DEFFAULT_NO_MESSAGE,
   DEFFAULT_NO_MESSAGE
 };
+
+//UART variables
+static UART_Handle uart;
+static UART_Params uartParams;
 
 // pointer to allocate the connection handle map
 static connHandleMapEntry_t *connHandleMap;
@@ -752,6 +760,7 @@ static void add_to_timeSync_reqList(gapDeviceInfoEvent_t timeSyncSlave);
 static bool saved_time_sync_info(uint8_t *addr);
 static void reset_scan_discovery_info(void);
 static uint64_t get_spot_status(void);
+static uint8_t init_UART(void);
 
 /*********************************************************************
  * EXTERN FUNCTIONS
@@ -855,6 +864,13 @@ static void multi_role_init(void)
 
   // Init keys and LCD
   Board_initKeys(multi_role_keyChangeHandler);
+
+#ifdef GATEWAY
+  //Init UART
+  if(init_UART() == FALSE)
+    return;
+#endif
+
   // Open Display.
   dispHandle = Display_open(MR_DISPLAY_TYPE, NULL);
 
@@ -875,7 +891,7 @@ static void multi_role_init(void)
   // Init two button menu
   tbm_initTwoBtnMenu(dispHandle, &mrMenuMain, 1, NULL);
 
-  //Tx power to 2 dbm
+  //Tx power to 4 dbm
   HCI_EXT_SetTxPowerCmd(HCI_EXT_TX_POWER_4_DBM);
 
   // Setup the GAP
@@ -1160,6 +1176,12 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
       {
         uint64_t my_time = get_my_global_time();
         Display_print1(dispHandle,12,0,"p: %d", my_time);
+
+        if(get_spot_status() == 0)
+          Display_print0(dispHandle, 14, 0, "Spot is open!");
+        else
+          Display_print0(dispHandle, 14, 0, "Spot is closed!");
+
       }
 
        //Manage global application states here
@@ -3030,8 +3052,8 @@ static void tscan_processEvts(uint32_t events)
   }
   else if(events & CHANGE_SCAN_PERIOD_EVT)
   {
-    //Change scan timing
-    scan_modulo_time = GLOBAL_WAKEUP_TIME;
+    //Change scan timing, TODO: change this later
+    //scan_modulo_time = GLOBAL_WAKEUP_TIME;
   }
   else if(events & TSYNC_MASTER_INIT)
   {
@@ -3093,10 +3115,11 @@ static void tsleep_processEvts(uint32_t events)
     {
       //turn_on_led(GREEN);
       Util_startClock(&awakeClock);
-      //enter_state(TSYNCED_CHANGE_SLAVE);
+      enter_state(TSYNCED_CHANGE_SLAVE);
     }else
     {
       Display_print0(dispHandle, 18, 0, "entering sleep!");
+      turn_off_led(GREEN);
       enter_state(TSYNCED_SLEEPING);
     }
   }
@@ -3184,6 +3207,7 @@ static void tchange_slave_processEvts(uint32_t events)
     case TCHANGE_SLAVE_BONDED:
       if(events & CC_ENABLED)
       {
+        Display_print1(dispHandle, 18, 0, "writing: %d", curr_spot_status);
         //Send  status
         if(SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4,
                                       SIMPLEPROFILE_CHAR4_LEN, &curr_spot_status) == FAILURE)
@@ -3194,7 +3218,7 @@ static void tchange_slave_processEvts(uint32_t events)
         else
         {
           tchange_slave_state = TCHANGE_SLAVE_SENT_DATA;
-          last_spot_status =  curr_spot_status;
+          last_spot_status =  get_spot_status();
         }
       }
     break;
@@ -3311,6 +3335,8 @@ static void tchange_master_processEvts(uint32_t events)
     case TCHANGE_MASTER_WAITING:
       if(events & WRITE_DATA)
       {
+        uint8_t input;
+
         if(Util_isActive(&stateTimeoutClock))
           Util_stopClock(&stateTimeoutClock);
 
@@ -3318,11 +3344,13 @@ static void tchange_master_processEvts(uint32_t events)
         //T2 Variable contains the spot update
         if(T2 == 0)
         {
-          Display_print1(dispHandle, 20, 0, " Spot %d is open!", curr_peer_addr[0]);
+          input = curr_peer_addr[0]*10 + 1;
+          UART_write(uart, &input, 1);
         }
         else
         {
-          Display_print1(dispHandle, 20, 0, "Spot %d is occupied!", curr_peer_addr[0]);
+          input = curr_peer_addr[0]*10;
+          UART_write(uart, &input, 1);
         }
 
         mr_doDisconnect(0);
@@ -3904,7 +3932,33 @@ static void reset_scan_discovery_info(void)
 //TODO: link to sensor value
 static uint64_t get_spot_status(void)
 {
-  return (HalTRNG_GetTRNG() % 2);
+  //return (HalTRNG_GetTRNG() % 2);
+  return 1 - PIN_getInputValue(Board_DIO22);
+}
+
+//Initialize UART subsystem
+static uint8_t init_UART(void)
+{
+  // Initialize the UART driver.
+  UART_init();
+
+  // Create a UART with data processing off.
+  UART_Params_init(&uartParams);
+  uartParams.writeDataMode = UART_DATA_BINARY;
+  uartParams.readDataMode = UART_DATA_BINARY;
+  uartParams.readReturnMode = UART_RETURN_FULL;
+  uartParams.readEcho = UART_ECHO_OFF;
+  uartParams.baudRate = 9600;
+
+  // Open an instance of the UART drivers
+  uart = UART_open(Board_UART0, &uartParams);
+
+  if (uart == NULL) {
+    // UART_open() failed
+    return FALSE;
+  }
+
+  return TRUE;
 }
 
 /*********************************************************************
