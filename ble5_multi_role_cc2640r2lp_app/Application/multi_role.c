@@ -174,7 +174,7 @@ Release Date: 2017-05-02 17:08:44
 #define AWAKE_TIME                            20000   //2s
 
 //Sensor absolute waking time
-#define GLOBAL_WAKEUP_TIME                    200000  //20s
+#define GLOBAL_WAKEUP_TIME                    50000  //5s
 
 //State timeout time
 #define STATE_TIMEOUT_TIME                    120000 // 12 s
